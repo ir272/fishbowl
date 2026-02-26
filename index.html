@@ -1139,6 +1139,47 @@ const particles = new THREE.Points(particleGeo, new THREE.PointsMaterial({
 scene.add(particles);
 
 // ================================================================
+// DUST MOTES — larger slow-drifting particles that catch light
+// ================================================================
+
+const DUST_COUNT = 30;
+const dustPositions = new Float32Array(DUST_COUNT * 3);
+const dustData = [];
+for (let i = 0; i < DUST_COUNT; i++) {
+  const a = rng() * Math.PI * 2;
+  const r = rng() * 3.0;
+  const y = SAND_Y + 0.5 + rng() * (WATER_Y - SAND_Y - 1);
+  dustPositions[i * 3] = Math.cos(a) * r;
+  dustPositions[i * 3 + 1] = y;
+  dustPositions[i * 3 + 2] = Math.sin(a) * r;
+  dustData.push({
+    driftX: (rng() - 0.5) * 0.2,
+    driftZ: (rng() - 0.5) * 0.2,
+    phase: rng() * Math.PI * 2,
+    bobSpeed: 0.3 + rng() * 0.5
+  });
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.Float32BufferAttribute(dustPositions, 3));
+
+const dustCanvas = document.createElement('canvas');
+dustCanvas.width = dustCanvas.height = 32;
+const dustCtx = dustCanvas.getContext('2d');
+const dustGrad = dustCtx.createRadialGradient(16, 16, 0, 16, 16, 14);
+dustGrad.addColorStop(0, 'rgba(220,210,180,0.8)');
+dustGrad.addColorStop(0.5, 'rgba(200,195,170,0.3)');
+dustGrad.addColorStop(1, 'rgba(180,175,160,0)');
+dustCtx.fillStyle = dustGrad;
+dustCtx.fillRect(0, 0, 32, 32);
+const dustTex = new THREE.CanvasTexture(dustCanvas);
+
+const dustMotes = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+  map: dustTex, size: 0.12, transparent: true, opacity: 0.35,
+  depthWrite: false, sizeAttenuation: true
+}));
+scene.add(dustMotes);
+
+// ================================================================
 // RISING BUBBLES
 // ================================================================
 
@@ -1210,7 +1251,7 @@ function createGodRay(x, z, width, angle) {
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
-    uniforms: { uTime: { value: 0 }, uOffset: { value: Math.random() * 10 }, uIntensity: { value: 1.0 } },
+    uniforms: { uTime: { value: 0 }, uOffset: { value: Math.random() * 10 }, uIntensity: { value: 1.0 }, uColor: { value: new THREE.Vector3(0.45, 0.65, 0.9) } },
     vertexShader: `
       varying vec2 vUv;
       void main() {
@@ -1222,6 +1263,7 @@ function createGodRay(x, z, width, angle) {
       uniform float uTime;
       uniform float uOffset;
       uniform float uIntensity;
+      uniform vec3 uColor;
       varying vec2 vUv;
       void main() {
         float y = vUv.y;
@@ -1230,7 +1272,7 @@ function createGodRay(x, z, width, angle) {
         beam *= 0.5 + 0.5 * sin(uTime * 0.2 + uOffset + y * 2.0);
         beam *= 0.7 + 0.3 * sin(uTime * 0.15 + uOffset * 2.0);
         beam *= uIntensity;
-        gl_FragColor = vec4(0.45, 0.65, 0.9, beam);
+        gl_FragColor = vec4(uColor, beam);
       }
     `
   });
@@ -1708,6 +1750,16 @@ class Fish {
     this.mesh.add(this.mouthMesh);
     this.mouthOpen = 0; // 0=closed, 1=fully open
 
+    // Fish shadow on sand floor
+    const shadowGeo = new THREE.CircleGeometry(species.size * 0.8, 12);
+    shadowGeo.rotateX(-Math.PI / 2);
+    this.shadowMat = new THREE.MeshBasicMaterial({
+      color: 0x000000, transparent: true, opacity: 0.1, depthWrite: false
+    });
+    this.shadowMesh = new THREE.Mesh(shadowGeo, this.shadowMat);
+    this.shadowMesh.position.set(pos.x, SAND_Y + 0.02, pos.z);
+    scene.add(this.shadowMesh);
+
     this.mesh.position.copy(pos);
     scene.add(this.mesh);
   }
@@ -1728,6 +1780,14 @@ class Fish {
     this.age += dt;
 
     this.mesh.position.copy(this.pos);
+
+    // Shadow follows fish position, fades with height
+    this.shadowMesh.position.set(this.pos.x, SAND_Y + 0.02, this.pos.z);
+    const heightAboveSand = Math.max(0, this.pos.y - SAND_Y);
+    const shadowOpacity = Math.max(0, 0.12 - heightAboveSand * 0.015) * this.opacity;
+    this.shadowMat.opacity = shadowOpacity;
+    const shadowScale = 1 + heightAboveSand * 0.15;
+    this.shadowMesh.scale.set(shadowScale, 1, shadowScale);
 
     // Fade in for newborns
     if (this.fadeIn > 0) {
@@ -1849,6 +1909,9 @@ class Fish {
   destroy() {
     this.alive = false;
     scene.remove(this.mesh);
+    scene.remove(this.shadowMesh);
+    this.shadowMesh.geometry.dispose();
+    this.shadowMat.dispose();
     this.body.geo.dispose();
     this.mat.dispose();
     // Dispose all child geometries
@@ -3061,11 +3124,19 @@ function animate(now) {
   // Sand caustics
   sandMat.uniforms.uTime.value = time;
 
-  // God rays — dimmed at night
+  // God rays — dimmed at night, color shifts with day phase
   const godRayIntensity = dayLight.sunIntensity;
+  // Dawn/dusk: warm golden rays, night: deep blue, day: bright cyan-blue
+  let grR, grG, grB;
+  if (dayPhase < 0.1) { grR = 0.8; grG = 0.6; grB = 0.35; } // dawn: warm gold
+  else if (dayPhase < 0.25) { const t = (dayPhase - 0.1) / 0.15; grR = 0.8 - t * 0.35; grG = 0.6 + t * 0.05; grB = 0.35 + t * 0.55; } // transition to day
+  else if (dayPhase < 0.45) { grR = 0.45; grG = 0.65; grB = 0.9; } // day: cool blue
+  else if (dayPhase < 0.6) { grR = 0.7; grG = 0.5; grB = 0.45; } // dusk: warm
+  else { grR = 0.2; grG = 0.3; grB = 0.6; } // night: deep blue
   for (const grMat of godRays) {
     grMat.uniforms.uTime.value = time;
     grMat.uniforms.uIntensity.value = godRayIntensity;
+    grMat.uniforms.uColor.value.set(grR, grG, grB);
   }
 
   // Background color shift + day phase
@@ -3109,6 +3180,25 @@ function animate(now) {
   const planktonG = 0.86 + nightFactor * 0.1;
   const planktonB = 1.0;
   particles.material.color.setRGB(planktonR, planktonG, planktonB);
+
+  // Dust mote drift — slow, lazy floating particles
+  const dp = dustGeo.attributes.position;
+  for (let i = 0; i < DUST_COUNT; i++) {
+    const dd = dustData[i];
+    let dx = dp.getX(i) + dd.driftX * dt;
+    let dy = dp.getY(i) + Math.sin(time * dd.bobSpeed + dd.phase) * 0.003;
+    let dz = dp.getZ(i) + dd.driftZ * dt;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist > 3.2 || dy > WATER_Y - 0.3 || dy < SAND_Y + 0.3) {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.random() * 2.5;
+      dx = Math.cos(a) * r;
+      dz = Math.sin(a) * r;
+      dy = SAND_Y + 0.5 + Math.random() * (WATER_Y - SAND_Y - 1);
+    }
+    dp.setX(i, dx); dp.setY(i, dy); dp.setZ(i, dz);
+  }
+  dp.needsUpdate = true;
 
   // Bubble rise
   const bp = bubbleGeo.attributes.position;
