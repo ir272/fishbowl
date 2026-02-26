@@ -129,8 +129,13 @@ canvas{display:block}
       <span class="species-name">Betta</span>
       <span class="species-count" id="count-large">0</span>
     </div>
+    <div class="species-row" style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(100,140,200,0.1)">
+      <span class="species-name" style="font-size:11px;color:rgba(140,170,220,0.5)">Total</span>
+      <span class="species-count" id="count-total" style="color:rgba(180,200,230,0.7)">0</span>
+    </div>
     <div class="hud-day" id="day-counter">Day 1</div>
     <div class="hud-day" id="time-of-day" style="border:none;margin-top:4px;padding-top:0"></div>
+    <div class="hud-day" id="eco-health" style="border:none;margin-top:2px;padding-top:0"></div>
     <div class="hud-day" id="sim-speed" style="border:none;margin-top:2px;padding-top:0;display:none"></div>
     <button id="feed-btn">Drop Food</button>
   </div>
@@ -331,16 +336,32 @@ const waterMat = new THREE.ShaderMaterial({
     varying vec3 vWorldPos;
     void main() {
       float d = length(vUv - 0.5) * 2.0;
-      // Ripple pattern on surface
-      float ripple = sin(vWorldPos.x * 5.0 + uTime * 0.7)
-                   * cos(vWorldPos.z * 4.0 + uTime * 0.5) * 0.3 + 0.7;
-      float alpha = 0.1 * (1.0 - d * 0.4) * ripple;
-      // Subtle color variation
-      vec3 waterColor = mix(vec3(0.2, 0.45, 0.65), vec3(0.35, 0.6, 0.75), ripple);
-      // Bright edge where water meets glass
-      float edge = smoothstep(0.85, 1.0, d);
-      waterColor += edge * vec3(0.2, 0.3, 0.4);
-      alpha += edge * 0.08;
+      // Multi-layer ripple pattern
+      float ripple1 = sin(vWorldPos.x * 5.0 + uTime * 0.7) * cos(vWorldPos.z * 4.0 + uTime * 0.5);
+      float ripple2 = sin(vWorldPos.x * 8.0 - vWorldPos.z * 6.0 + uTime * 1.1) * 0.5;
+      float ripple3 = cos(vWorldPos.x * 3.0 + vWorldPos.z * 7.0 + uTime * 0.4) * 0.3;
+      float ripple = (ripple1 + ripple2 + ripple3) * 0.15 + 0.75;
+
+      float alpha = 0.12 * (1.0 - d * 0.3) * ripple;
+
+      // Water color with slight caustic pattern
+      vec3 waterColor = mix(vec3(0.15, 0.4, 0.6), vec3(0.3, 0.55, 0.7), ripple);
+
+      // Fresnel-like view angle effect (looking more straight-on = more transparent)
+      vec3 viewDir = normalize(cameraPosition - vWorldPos);
+      float surfaceFresnel = pow(1.0 - abs(viewDir.y), 2.0);
+      alpha = mix(alpha * 0.5, alpha * 1.5, surfaceFresnel);
+      waterColor = mix(waterColor, vec3(0.5, 0.7, 0.85), surfaceFresnel * 0.2);
+
+      // Meniscus: bright ring where water meets glass
+      float edge = smoothstep(0.82, 0.98, d);
+      waterColor += edge * vec3(0.25, 0.35, 0.45);
+      alpha += edge * 0.12;
+
+      // Highlight from surface tension
+      float tension = smoothstep(0.95, 1.0, d) * 0.15;
+      waterColor += tension * vec3(0.8, 0.9, 1.0);
+
       gl_FragColor = vec4(waterColor, alpha);
     }
   `
@@ -635,6 +656,43 @@ anemones.push(createAnemone(-1.8, -1.2, 0xff4488, 14, 0.4));
 anemones.push(createAnemone(1.0, 2.0, 0xff6633, 10, 0.3));
 anemones.push(createAnemone(0.5, -0.8, 0xcc55aa, 12, 0.35));
 
+// Starfish on sand
+function createStarfish(x, z, color, size) {
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.6 });
+  const armCount = 5;
+  for (let i = 0; i < armCount; i++) {
+    const angle = (i / armCount) * Math.PI * 2;
+    // Each arm is a tapered box
+    const armLen = size * 0.7;
+    const armGeo = new THREE.BoxGeometry(size * 0.12, size * 0.04, armLen);
+    // Taper: narrow at tip
+    const p = armGeo.attributes.position;
+    for (let j = 0; j < p.count; j++) {
+      const z = p.getZ(j);
+      const taper = 1 - (z + armLen / 2) / armLen * 0.7;
+      p.setX(j, p.getX(j) * taper);
+      p.setY(j, p.getY(j) * taper);
+    }
+    armGeo.computeVertexNormals();
+    const arm = new THREE.Mesh(armGeo, mat);
+    arm.position.set(Math.cos(angle) * armLen * 0.45, 0, Math.sin(angle) * armLen * 0.45);
+    arm.rotation.y = -angle + Math.PI / 2;
+    group.add(arm);
+  }
+  // Center body
+  const center = new THREE.Mesh(new THREE.SphereGeometry(size * 0.12, 8, 6), mat);
+  center.scale.y = 0.4;
+  group.add(center);
+
+  group.position.set(x, SAND_Y + size * 0.02, z);
+  group.rotation.y = rng() * Math.PI * 2;
+  scene.add(group);
+}
+
+createStarfish(1.5, 1.5, 0xff5533, 0.35);
+createStarfish(-0.9, -2.0, 0xdd6644, 0.25);
+
 // Decorative shells scattered on sand
 function createShell(x, z, scale) {
   // Spiral shell using torus section
@@ -755,6 +813,62 @@ for (let i = 0; i < 15; i++) {
   group.position.set(-1.0, SAND_Y + 0.01, 0.6);
   group.rotation.y = 0.3;
   group.scale.setScalar(0.85);
+  scene.add(group);
+})();
+
+// ================================================================
+// SCUBA DIVER FIGURINE
+// ================================================================
+
+(function createDiver() {
+  const group = new THREE.Group();
+  const suitMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 });
+  const skinMat = new THREE.MeshStandardMaterial({ color: 0xddb896, roughness: 0.8 });
+  const tankMat = new THREE.MeshStandardMaterial({ color: 0xcc3333, roughness: 0.4, metalness: 0.3 });
+  const maskMat = new THREE.MeshStandardMaterial({ color: 0x44aadd, roughness: 0.1, metalness: 0.5, transparent: true, opacity: 0.7 });
+
+  // Body (cylinder)
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.2, 8), suitMat);
+  body.position.y = 0.2;
+  group.add(body);
+
+  // Head
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), skinMat);
+  head.position.y = 0.35;
+  group.add(head);
+
+  // Mask
+  const mask = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.035, 0.04), maskMat);
+  mask.position.set(0, 0.35, 0.035);
+  group.add(mask);
+
+  // Air tank
+  const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.15, 6), tankMat);
+  tank.position.set(0, 0.22, -0.06);
+  group.add(tank);
+
+  // Legs
+  for (const side of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.02, 0.15, 6), suitMat);
+    leg.position.set(side * 0.03, 0.075, 0);
+    group.add(leg);
+    // Flippers
+    const flipper = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.01, 0.1), new THREE.MeshStandardMaterial({ color: 0x222288, roughness: 0.5 }));
+    flipper.position.set(side * 0.03, 0.005, 0.03);
+    group.add(flipper);
+  }
+
+  // Arms
+  for (const side of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.012, 0.12, 6), suitMat);
+    arm.position.set(side * 0.08, 0.22, 0);
+    arm.rotation.z = side * 0.3;
+    group.add(arm);
+  }
+
+  group.position.set(2.0, SAND_Y + 0.01, -0.3);
+  group.rotation.y = -0.5;
+  group.scale.setScalar(1.2);
   scene.add(group);
 })();
 
@@ -1696,6 +1810,11 @@ function updateEcosystem(dt) {
       const y = SAND_Y + 1.5 + Math.random() * (WATER_Y - SAND_Y - 3);
       const pos = new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r);
       fishList.push(new Fish(sp, key, pos));
+      showEvent(`A wild ${sp.name} appeared!`);
+    }
+    // Endangered warning
+    if (counts3[key] <= sp.minPop + 1 && counts3[key] > 0) {
+      showEvent(`${sp.name} population is low!`);
     }
   }
 
@@ -1846,12 +1965,21 @@ canvas.addEventListener('mousemove', e => {
   camPhi = Math.max(0.3, Math.min(Math.PI * 0.48, camPhi - (e.clientY - prevMY) * 0.005));
   prevMX = e.clientX; prevMY = e.clientY;
 });
+let lastClickTime = 0;
 canvas.addEventListener('mouseup', e => {
   dragging = false;
   const dx = e.clientX - clickStartX, dy = e.clientY - clickStartY;
   if (dx * dx + dy * dy < 25) {
-    // Try to select a fish first, otherwise drop food
-    if (!trySelectFish(e)) handleClick(e);
+    const now = performance.now();
+    if (now - lastClickTime < 350) {
+      // Double-click: zoom in/out toggle
+      camRadiusTarget = camRadiusTarget < 10 ? 13 : 8;
+      lastClickTime = 0;
+    } else {
+      // Single click: try to select fish, otherwise drop food
+      if (!trySelectFish(e)) handleClick(e);
+      lastClickTime = now;
+    }
   }
 });
 canvas.addEventListener('mouseleave', () => { dragging = false; mouseWorldPos = null; });
@@ -1905,6 +2033,25 @@ function getTimeOfDayLabel(phase) {
   return 'Late Night';
 }
 
+const hudTotal = document.getElementById('count-total');
+const hudEcoHealth = document.getElementById('eco-health');
+
+function getEcoHealth(counts) {
+  // Health based on biodiversity and population levels
+  let score = 0;
+  for (const key of ['small', 'medium', 'large']) {
+    const sp = SPECIES[key];
+    const ratio = counts[key] / sp.maxPop;
+    if (ratio >= 0.3 && ratio <= 0.9) score += 33;
+    else if (ratio > 0) score += 15;
+  }
+  score = Math.min(100, score);
+  if (score >= 80) return { label: 'Thriving', color: 'rgba(80,220,120,0.7)' };
+  if (score >= 50) return { label: 'Balanced', color: 'rgba(180,200,100,0.7)' };
+  if (score >= 25) return { label: 'Stressed', color: 'rgba(220,160,60,0.7)' };
+  return { label: 'Critical', color: 'rgba(220,80,60,0.7)' };
+}
+
 function updateHUD(dt, time) {
   hudTimer += dt;
   if (hudTimer < 0.5) return;
@@ -1913,8 +2060,12 @@ function updateHUD(dt, time) {
   hudSmall.textContent = c.small;
   hudMedium.textContent = c.medium;
   hudLarge.textContent = c.large;
+  hudTotal.textContent = c.small + c.medium + c.large;
   const phase = getDayPhase(time);
   hudTimeOfDay.textContent = getTimeOfDayLabel(phase);
+  const eco = getEcoHealth(c);
+  hudEcoHealth.textContent = eco.label;
+  hudEcoHealth.style.color = eco.color;
 }
 
 function updateDay(dt) {
