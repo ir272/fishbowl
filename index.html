@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Impossible Fishbowl</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{overflow:hidden;background:#000}
+canvas{display:block}
+</style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+// ================================================================
+// THE IMPOSSIBLE FISHBOWL
+// A mesmerizing real-time 3D aquarium ecosystem
+// ================================================================
+
+// --- Seeded RNG for deterministic environment ---
+function mkRng(seed) {
+  let s = seed;
+  return function() { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+}
+const rng = mkRng(42);
+
+// ================================================================
+// RENDERER & SCENE
+// ================================================================
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0x030912);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+
+// ================================================================
+// LIGHTING
+// ================================================================
+
+scene.add(new THREE.AmbientLight(0x334466, 0.5));
+
+const sunLight = new THREE.DirectionalLight(0xffeedd, 0.9);
+sunLight.position.set(3, 10, 5);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(1024, 1024);
+Object.assign(sunLight.shadow.camera, { near: 1, far: 25, left: -7, right: 7, top: 7, bottom: -7 });
+scene.add(sunLight);
+
+const fillLight = new THREE.PointLight(0x446688, 0.3, 15);
+fillLight.position.set(-3, -2, 4);
+scene.add(fillLight);
+
+const underwaterGlow = new THREE.PointLight(0x2277aa, 0.4, 10);
+underwaterGlow.position.set(0, -2, 0);
+scene.add(underwaterGlow);
+
+// ================================================================
+// CONSTANTS
+// ================================================================
+
+const BOWL_RADIUS = 5;
+const BOWL_THETA_START = Math.acos(0.6);        // ~0.927 rad
+const BOWL_OPENING_Y = BOWL_RADIUS * 0.6;       // 3.0
+const BOWL_OPENING_R = BOWL_RADIUS * Math.sin(BOWL_THETA_START); // 4.0
+const WATER_Y = 2.5;
+const SAND_Y = -4.0;
+const SAND_RADIUS = Math.sqrt(BOWL_RADIUS * BOWL_RADIUS - SAND_Y * SAND_Y) - 0.25; // ~2.75
+
+// ================================================================
+// GLASS BOWL
+// ================================================================
+
+const bowlGeo = new THREE.SphereGeometry(
+  BOWL_RADIUS, 64, 48,
+  0, Math.PI * 2,
+  BOWL_THETA_START, Math.PI - BOWL_THETA_START
+);
+
+const glassMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    void main() {
+      vNormal = normalize(mat3(modelMatrix) * normal);
+      vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    void main() {
+      vec3 viewDir = normalize(cameraPosition - vWorldPos);
+      vec3 n = gl_FrontFacing ? vNormal : -vNormal;
+      float fresnel = pow(1.0 - abs(dot(n, viewDir)), 3.0);
+      vec3 color = mix(vec3(0.7, 0.85, 0.95), vec3(0.95, 0.97, 1.0), fresnel);
+
+      vec3 lightDir = normalize(vec3(3.0, 10.0, 5.0));
+      vec3 h = normalize(lightDir + viewDir);
+      float spec = pow(max(dot(n, h), 0.0), 128.0);
+      color += spec * 0.6;
+
+      float alpha = mix(0.04, 0.3, fresnel) + spec * 0.4;
+      gl_FragColor = vec4(color, alpha);
+    }
+  `
+});
+
+scene.add(new THREE.Mesh(bowlGeo, glassMat));
+
+// Bowl rim
+const rimGeo = new THREE.TorusGeometry(BOWL_OPENING_R, 0.1, 12, 64);
+const rimMat = new THREE.MeshStandardMaterial({
+  color: 0xbbccdd, roughness: 0.05, metalness: 0.2,
+  transparent: true, opacity: 0.5
+});
+const rim = new THREE.Mesh(rimGeo, rimMat);
+rim.rotation.x = Math.PI / 2;
+rim.position.y = BOWL_OPENING_Y;
+scene.add(rim);
+
+// ================================================================
+// WATER SURFACE
+// ================================================================
+
+const waterGeo = new THREE.CircleGeometry(
+  Math.sqrt(BOWL_RADIUS * BOWL_RADIUS - WATER_Y * WATER_Y) - 0.15, 64
+);
+waterGeo.rotateX(-Math.PI / 2);
+
+const waterMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      vec3 pos = position;
+      pos.y += sin(pos.x * 2.0 + uTime * 0.8) * 0.04
+             + cos(pos.z * 2.5 + uTime * 0.6) * 0.03;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main() {
+      float d = length(vUv - 0.5) * 2.0;
+      float alpha = 0.12 * (1.0 - d * 0.3);
+      gl_FragColor = vec4(0.3, 0.55, 0.7, alpha);
+    }
+  `
+});
+const waterSurface = new THREE.Mesh(waterGeo, waterMat);
+waterSurface.position.y = WATER_Y;
+scene.add(waterSurface);
+
+// ================================================================
+// SAND FLOOR
+// ================================================================
+
+const sandCanvas = document.createElement('canvas');
+sandCanvas.width = sandCanvas.height = 512;
+const sCtx = sandCanvas.getContext('2d');
+sCtx.fillStyle = '#c4a882';
+sCtx.fillRect(0, 0, 512, 512);
+for (let i = 0; i < 40000; i++) {
+  const b = rng() * 30 - 15 | 0;
+  sCtx.fillStyle = `rgb(${196 + b},${168 + b},${130 + b})`;
+  sCtx.fillRect(rng() * 512, rng() * 512, 1 + rng() * 2, 1 + rng() * 2);
+}
+const sandTexture = new THREE.CanvasTexture(sandCanvas);
+sandTexture.wrapS = sandTexture.wrapT = THREE.RepeatWrapping;
+
+const sandGeo = new THREE.CircleGeometry(SAND_RADIUS, 64);
+sandGeo.rotateX(-Math.PI / 2);
+const sp = sandGeo.attributes.position;
+for (let i = 0; i < sp.count; i++) {
+  const x = sp.getX(i), z = sp.getZ(i);
+  const d = Math.sqrt(x * x + z * z) / SAND_RADIUS;
+  sp.setY(i, sp.getY(i) + rng() * 0.12 * (1 - d));
+}
+sandGeo.computeVertexNormals();
+
+const sand = new THREE.Mesh(sandGeo, new THREE.MeshStandardMaterial({
+  map: sandTexture, roughness: 0.95, metalness: 0
+}));
+sand.position.y = SAND_Y;
+sand.receiveShadow = true;
+scene.add(sand);
+
+// ================================================================
+// ROCKS
+// ================================================================
+
+function createRock(size, x, z) {
+  const geo = new THREE.IcosahedronGeometry(size, 1);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const n = 0.7 + rng() * 0.6;
+    p.setXYZ(i, p.getX(i) * n, p.getY(i) * (0.5 + rng() * 0.3), p.getZ(i) * n);
+  }
+  geo.computeVertexNormals();
+  const shade = 0.2 + rng() * 0.15;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    color: new THREE.Color(shade, shade * 0.9, shade * 0.8), roughness: 0.9
+  }));
+  mesh.position.set(x, SAND_Y + size * 0.3, z);
+  mesh.rotation.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI);
+  mesh.castShadow = mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+createRock(0.5, -1.5, 1.0);
+createRock(0.35, 1.2, 1.5);
+createRock(0.45, -0.6, -1.5);
+createRock(0.55, 2.0, -0.5);
+createRock(0.35, -2.0, -0.3);
+createRock(0.3, 0.3, -2.0);
+
+// ================================================================
+// CORAL
+// ================================================================
+
+function createCoral(x, z, color, height, branchCount) {
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55 });
+
+  // Trunk
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.04, 0.12, height, 8), mat
+  );
+  trunk.position.y = height / 2;
+  group.add(trunk);
+
+  // Branches
+  for (let i = 0; i < branchCount; i++) {
+    const bh = height * (0.3 + rng() * 0.4);
+    const branch = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.02, 0.06, bh, 6), mat
+    );
+    const startY = height * (0.3 + rng() * 0.5);
+    const angle = rng() * Math.PI * 2;
+    const tilt = 0.3 + rng() * 0.5;
+    branch.position.set(Math.sin(angle) * 0.15, startY + bh * 0.4, Math.cos(angle) * 0.15);
+    branch.rotation.set(tilt * Math.cos(angle), 0, tilt * Math.sin(angle));
+    group.add(branch);
+
+    // Tip bulb
+    const bulb = new THREE.Mesh(
+      new THREE.SphereGeometry(0.04 + rng() * 0.04, 8, 8), mat
+    );
+    bulb.position.set(
+      branch.position.x + Math.sin(angle) * bh * 0.3,
+      startY + bh * 0.8,
+      branch.position.z + Math.cos(angle) * bh * 0.3
+    );
+    group.add(bulb);
+  }
+
+  group.position.set(x, SAND_Y + 0.05, z);
+  scene.add(group);
+  return group;
+}
+
+createCoral(1.5, -1.0, 0xff5566, 1.5, 5);
+createCoral(-1.2, -1.8, 0xff8844, 1.2, 4);
+createCoral(-0.3, 2.0, 0xaa44cc, 1.0, 3);
+createCoral(0.8, 1.8, 0xff6699, 0.8, 3);
+
+// Seaweed (simple waving planes, will animate later)
+function createSeaweed(x, z, height, color) {
+  const geo = new THREE.PlaneGeometry(0.25, height, 1, 8);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const y = p.getY(i);
+    const t = (y / height + 0.5);
+    p.setX(i, p.getX(i) + Math.sin(t * 2) * 0.1);
+  }
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    color, side: THREE.DoubleSide, transparent: true, opacity: 0.85
+  }));
+  mesh.position.set(x, SAND_Y + height * 0.5, z);
+  mesh.rotation.y = rng() * Math.PI;
+  scene.add(mesh);
+  return mesh;
+}
+
+const seaweeds = [];
+seaweeds.push(createSeaweed(-1.8, 0.5, 2.0, 0x2d6b3a));
+seaweeds.push(createSeaweed(1.6, 0.8, 1.5, 0x3a7d4a));
+seaweeds.push(createSeaweed(-0.8, 2.0, 1.8, 0x1f5c2e));
+seaweeds.push(createSeaweed(0.5, -2.2, 1.3, 0x2a6e38));
+
+// ================================================================
+// FLOATING PARTICLES (plankton / debris)
+// ================================================================
+
+const pCanvas = document.createElement('canvas');
+pCanvas.width = pCanvas.height = 32;
+const pCtx = pCanvas.getContext('2d');
+const pGrad = pCtx.createRadialGradient(16, 16, 0, 16, 16, 16);
+pGrad.addColorStop(0, 'rgba(200,220,255,0.9)');
+pGrad.addColorStop(1, 'rgba(200,220,255,0)');
+pCtx.fillStyle = pGrad;
+pCtx.fillRect(0, 0, 32, 32);
+const pTex = new THREE.CanvasTexture(pCanvas);
+
+const PARTICLE_COUNT = 250;
+const particlePositions = new Float32Array(PARTICLE_COUNT * 3);
+const particleSpeeds = new Float32Array(PARTICLE_COUNT);
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  const angle = rng() * Math.PI * 2;
+  const r = rng() * 3.0;
+  const y = SAND_Y + 0.5 + rng() * (WATER_Y - SAND_Y - 1);
+  particlePositions[i * 3] = Math.cos(angle) * r;
+  particlePositions[i * 3 + 1] = y;
+  particlePositions[i * 3 + 2] = Math.sin(angle) * r;
+  particleSpeeds[i] = 0.005 + rng() * 0.01;
+}
+const particleGeo = new THREE.BufferGeometry();
+particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+
+const particles = new THREE.Points(particleGeo, new THREE.PointsMaterial({
+  map: pTex, size: 0.06, transparent: true, opacity: 0.5,
+  blending: THREE.AdditiveBlending, depthWrite: false
+}));
+scene.add(particles);
+
+// ================================================================
+// BACKGROUND
+// ================================================================
+
+const bgMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec3 vPos;
+    void main() {
+      vPos = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec3 vPos;
+    void main() {
+      float y = normalize(vPos).y;
+      float s = sin(uTime * 0.03) * 0.01;
+      vec3 top = vec3(0.06 + s, 0.09, 0.16);
+      vec3 mid = vec3(0.03, 0.06 + s, 0.12);
+      vec3 bot = vec3(0.01, 0.02, 0.04);
+      vec3 c = mix(bot, mid, smoothstep(-0.5, 0.0, y));
+      c = mix(c, top, smoothstep(0.0, 0.5, y));
+      gl_FragColor = vec4(c, 1.0);
+    }
+  `
+});
+const bgSphere = new THREE.Mesh(new THREE.SphereGeometry(45, 16, 16), bgMat);
+bgSphere.renderOrder = -100;
+scene.add(bgSphere);
+
+// ================================================================
+// CAMERA CONTROLS
+// ================================================================
+
+let camRadius = 13, camPhi = 1.05, camTheta = 0;
+let dragging = false, prevMX = 0, prevMY = 0;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('mousedown', e => {
+  dragging = true; prevMX = e.clientX; prevMY = e.clientY;
+});
+canvas.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  camTheta -= (e.clientX - prevMX) * 0.005;
+  camPhi = Math.max(0.3, Math.min(Math.PI * 0.48, camPhi - (e.clientY - prevMY) * 0.005));
+  prevMX = e.clientX; prevMY = e.clientY;
+});
+canvas.addEventListener('mouseup', () => dragging = false);
+canvas.addEventListener('mouseleave', () => dragging = false);
+canvas.addEventListener('wheel', e => {
+  camRadius = Math.max(7, Math.min(22, camRadius + e.deltaY * 0.01));
+}, { passive: true });
+
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) {
+    dragging = true;
+    prevMX = e.touches[0].clientX;
+    prevMY = e.touches[0].clientY;
+  }
+}, { passive: true });
+canvas.addEventListener('touchmove', e => {
+  if (!dragging || e.touches.length !== 1) return;
+  camTheta -= (e.touches[0].clientX - prevMX) * 0.005;
+  camPhi = Math.max(0.3, Math.min(Math.PI * 0.48, camPhi - (e.touches[0].clientY - prevMY) * 0.005));
+  prevMX = e.touches[0].clientX; prevMY = e.touches[0].clientY;
+}, { passive: true });
+canvas.addEventListener('touchend', () => dragging = false);
+
+// ================================================================
+// RENDER LOOP
+// ================================================================
+
+let lastTime = 0;
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const time = now * 0.001;
+  const dt = Math.min(time - lastTime, 0.05);
+  lastTime = time;
+  if (dt <= 0) return;
+
+  // Auto-rotate when not dragging
+  if (!dragging) camTheta += 0.04 * dt;
+
+  // Update camera
+  camera.position.set(
+    camRadius * Math.sin(camPhi) * Math.sin(camTheta),
+    camRadius * Math.cos(camPhi),
+    camRadius * Math.sin(camPhi) * Math.cos(camTheta)
+  );
+  camera.lookAt(0, -0.5, 0);
+
+  // Water waves
+  waterMat.uniforms.uTime.value = time;
+
+  // Background color shift
+  bgMat.uniforms.uTime.value = time;
+
+  // Particle drift
+  const pp = particleGeo.attributes.position;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    let y = pp.getY(i) + particleSpeeds[i] * dt * 60;
+    if (y > WATER_Y - 0.3) {
+      y = SAND_Y + 0.5;
+      const a = Math.random() * Math.PI * 2, r = Math.random() * 3;
+      pp.setX(i, Math.cos(a) * r);
+      pp.setZ(i, Math.sin(a) * r);
+    }
+    pp.setY(i, y);
+  }
+  pp.needsUpdate = true;
+
+  // Seaweed sway
+  seaweeds.forEach((sw, idx) => {
+    sw.rotation.z = Math.sin(time * 0.5 + idx * 1.5) * 0.08;
+    sw.rotation.x = Math.cos(time * 0.3 + idx * 2.0) * 0.05;
+  });
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(animate);
+
+// ================================================================
+// RESIZE
+// ================================================================
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+</script>
+</body>
+</html>
