@@ -1175,7 +1175,7 @@ createGodRay(-0.5, -1.8, 1.0, 0.8);
 const atmosGeo = new THREE.SphereGeometry(BOWL_RADIUS - 0.5, 32, 32);
 const atmosMat = new THREE.ShaderMaterial({
   transparent: true, depthWrite: false, side: THREE.BackSide,
-  uniforms: {},
+  uniforms: { uDayPhase: { value: 0 } },
   vertexShader: `
     varying vec3 vWorldPos;
     void main() {
@@ -1184,12 +1184,24 @@ const atmosMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    uniform float uDayPhase;
     varying vec3 vWorldPos;
     void main() {
       float depth = 1.0 - (vWorldPos.y + 5.0) / 8.0;
       depth = clamp(depth, 0.0, 1.0);
-      float alpha = depth * 0.08;
-      gl_FragColor = vec4(0.05, 0.1, 0.2, alpha);
+      // Atmosphere gets denser at night, warmer at dawn/dusk
+      float nightMix = 0.0;
+      float dawnMix = 0.0;
+      if (uDayPhase < 0.15) { dawnMix = 1.0 - uDayPhase / 0.15; nightMix = dawnMix * 0.3; }
+      else if (uDayPhase > 0.5 && uDayPhase < 0.65) { dawnMix = (uDayPhase - 0.5) / 0.15; nightMix = dawnMix * 0.3; }
+      else if (uDayPhase >= 0.65) { nightMix = 1.0; }
+      float alpha = depth * (0.08 + nightMix * 0.06);
+      vec3 dayColor = vec3(0.05, 0.1, 0.2);
+      vec3 nightColor = vec3(0.02, 0.04, 0.12);
+      vec3 dawnColor = vec3(0.12, 0.06, 0.04);
+      vec3 color = mix(dayColor, nightColor, nightMix);
+      color = mix(color, dawnColor, dawnMix * 0.3);
+      gl_FragColor = vec4(color, alpha);
     }
   `
 });
@@ -2700,8 +2712,15 @@ function animate(now) {
   // Fish follow camera
   if (followedFish && (!followedFish.alive || followedFish.dying)) stopFollowing();
 
-  // Auto-rotate when not dragging
-  if (!dragging && !followedFish) camTheta += (underwaterMode ? 0.015 : 0.04) * dt;
+  // Auto-rotate when not dragging + subtle cinematic sway
+  if (!dragging && !followedFish) {
+    camTheta += (underwaterMode ? 0.015 : 0.04) * dt;
+    // Subtle camera breathing (very slight vertical bob)
+    if (!underwaterMode) {
+      const breathe = Math.sin(time * 0.3) * 0.002;
+      camPhi += breathe * dt;
+    }
+  }
 
   // Update camera
   let lookTarget;
@@ -2764,6 +2783,7 @@ function animate(now) {
   // Background color shift + day phase
   bgMat.uniforms.uTime.value = time;
   bgMat.uniforms.uDayPhase.value = dayPhase;
+  atmosMat.uniforms.uDayPhase.value = dayPhase;
 
   // Particle drift + bioluminescence at night
   const pp = particleGeo.attributes.position;
