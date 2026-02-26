@@ -436,12 +436,15 @@ class Fish {
     this.acc = new THREE.Vector3();
     this.age = 0;
     this.alive = true;
+    this.dying = false;
+    this.fadeIn = 1.0;
     this.swimPhase = rng() * Math.PI * 2;
-    this.opacity = 1;
+    this.opacity = 0;
 
     const color = species.colors[Math.floor(rng() * species.colors.length)];
     this.mat = new THREE.MeshStandardMaterial({
-      color, roughness: 0.3, metalness: 0.15, side: THREE.DoubleSide
+      color, roughness: 0.3, metalness: 0.15, side: THREE.DoubleSide,
+      transparent: true, opacity: 0
     });
 
     this.mesh = new THREE.Group();
@@ -528,6 +531,21 @@ class Fish {
     this.age += dt;
 
     this.mesh.position.copy(this.pos);
+
+    // Fade in for newborns
+    if (this.fadeIn > 0) {
+      this.fadeIn -= dt * 0.8;
+      this.opacity = Math.max(0, 1 - this.fadeIn);
+      this.mat.opacity = this.opacity;
+    } else if (this.dying) {
+      // Dying: fade out and sink
+      this.opacity -= dt * 0.4;
+      this.mat.opacity = Math.max(0, this.opacity);
+      this.pos.y -= dt * 0.3;
+      if (this.opacity <= 0) { this.destroy(); return; }
+    } else {
+      if (this.mat.opacity < 1) { this.mat.opacity = 1; this.opacity = 1; }
+    }
 
     // Smooth rotation toward velocity
     if (spd > 0.01) {
@@ -653,6 +671,40 @@ function boids(fish, allFish, dt) {
   const idealY = (SAND_Y + WATER_Y) * 0.5 - 0.5;
   const yDiff = idealY - fish.pos.y;
   fish.applyForce(new THREE.Vector3(0, yDiff * sp.maxForce * 0.1, 0));
+
+  // Predator avoidance — flee from species that eat us
+  if (sp.predators.length > 0) {
+    for (let i = 0; i < allFish.length; i++) {
+      const other = allFish[i];
+      if (other === fish || !other.alive || other.dying) continue;
+      if (!sp.predators.includes(other.speciesKey)) continue;
+      _diff.subVectors(fish.pos, other.pos);
+      const dist = _diff.length();
+      if (dist < sp.neighborDist * 1.5 && dist > 0) {
+        _diff.normalize().multiplyScalar(sp.maxForce * 3 / Math.max(dist * 0.3, 0.1));
+        fish.applyForce(_diff);
+      }
+    }
+  }
+
+  // Prey chasing — hunt species we eat
+  if (sp.prey.length > 0 && !fish.dying) {
+    let closestPrey = null, closestDist = Infinity;
+    for (let i = 0; i < allFish.length; i++) {
+      const other = allFish[i];
+      if (other === fish || !other.alive || other.dying) continue;
+      if (!sp.prey.includes(other.speciesKey)) continue;
+      const dist = fish.pos.distanceTo(other.pos);
+      if (dist < closestDist && dist < sp.neighborDist * 2) {
+        closestDist = dist;
+        closestPrey = other;
+      }
+    }
+    if (closestPrey) {
+      _steer.subVectors(closestPrey.pos, fish.pos).normalize().multiplyScalar(sp.maxForce * 1.2);
+      fish.applyForce(_steer);
+    }
+  }
 }
 
 // Species definitions
@@ -670,7 +722,8 @@ const SPECIES = {
     colors: [0x00aaff, 0x0088dd, 0x44ccff, 0x2299ee],
     predators: ['medium', 'large'],
     prey: [],
-    schooling: true
+    schooling: true,
+    lifespan: 150, maturityAge: 20, reproChance: 0.4, maxPop: 25, minPop: 5
   },
   medium: {
     name: 'Angelfish',
@@ -685,7 +738,8 @@ const SPECIES = {
     colors: [0xffcc44, 0xffaa22, 0xeebb55, 0xffd866],
     predators: ['large'],
     prey: ['small'],
-    schooling: true
+    schooling: true,
+    lifespan: 240, maturityAge: 30, reproChance: 0.25, maxPop: 12, minPop: 3
   },
   large: {
     name: 'Betta',
@@ -700,7 +754,8 @@ const SPECIES = {
     colors: [0xcc22ff, 0xaa00dd, 0x8833cc, 0xbb44ee],
     predators: [],
     prey: ['small', 'medium'],
-    schooling: false
+    schooling: false,
+    lifespan: 400, maturityAge: 50, reproChance: 0.15, maxPop: 5, minPop: 1
   }
 };
 
@@ -719,6 +774,103 @@ function spawnFish(speciesKey, count) {
 spawnFish('small', 18);
 spawnFish('medium', 8);
 spawnFish('large', 3);
+
+// ================================================================
+// ECOSYSTEM — food chain, reproduction, lifespan
+// ================================================================
+
+let ecoTimer = 0;
+const ECO_TICK = 5; // seconds between ecosystem checks
+
+function countSpecies() {
+  const c = { small: 0, medium: 0, large: 0 };
+  for (const f of fishList) if (f.alive && !f.dying) c[f.speciesKey]++;
+  return c;
+}
+
+function checkEating() {
+  for (let i = 0; i < fishList.length; i++) {
+    const pred = fishList[i];
+    if (!pred.alive || pred.dying || pred.species.prey.length === 0) continue;
+
+    for (let j = 0; j < fishList.length; j++) {
+      const prey = fishList[j];
+      if (!prey.alive || prey.dying || pred === prey) continue;
+      if (!pred.species.prey.includes(prey.speciesKey)) continue;
+
+      const dist = pred.pos.distanceTo(prey.pos);
+      const eatDist = (pred.species.size + prey.species.size) * 0.6;
+      if (dist < eatDist) {
+        const counts = countSpecies();
+        if (counts[prey.speciesKey] > prey.species.minPop) {
+          prey.dying = true;
+          prey.opacity = prey.mat.opacity;
+          // Predator grows slightly
+          pred.mesh.scale.multiplyScalar(1.01);
+        }
+      }
+    }
+  }
+}
+
+function updateEcosystem(dt) {
+  // Eating happens every frame
+  checkEating();
+
+  ecoTimer += dt;
+  if (ecoTimer < ECO_TICK) return;
+  ecoTimer = 0;
+
+  const counts = countSpecies();
+
+  // Reproduction
+  for (const key of ['small', 'medium', 'large']) {
+    const sp = SPECIES[key];
+    if (counts[key] >= 2 && counts[key] < sp.maxPop && Math.random() < sp.reproChance) {
+      const parents = fishList.filter(f => f.alive && !f.dying && f.speciesKey === key && f.age > sp.maturityAge);
+      if (parents.length >= 2) {
+        const parent = parents[Math.floor(Math.random() * parents.length)];
+        const offset = new THREE.Vector3(
+          (Math.random() - 0.5) * 0.5,
+          (Math.random() - 0.5) * 0.3,
+          (Math.random() - 0.5) * 0.5
+        );
+        const baby = new Fish(sp, key, parent.pos.clone().add(offset));
+        fishList.push(baby);
+      }
+    }
+  }
+
+  // Lifespan — old fish start dying
+  for (const f of fishList) {
+    if (!f.alive || f.dying) continue;
+    if (f.age > f.species.lifespan) {
+      const counts2 = countSpecies();
+      if (counts2[f.speciesKey] > f.species.minPop) {
+        f.dying = true;
+        f.opacity = f.mat.opacity;
+      }
+    }
+  }
+
+  // Respawn protection: if any species is below minimum, spawn one
+  const counts3 = countSpecies();
+  for (const key of ['small', 'medium', 'large']) {
+    const sp = SPECIES[key];
+    if (counts3[key] < sp.minPop) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = 1 + Math.random() * 2;
+      const y = SAND_Y + 1.5 + Math.random() * (WATER_Y - SAND_Y - 3);
+      const pos = new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r);
+      fishList.push(new Fish(sp, key, pos));
+    }
+  }
+
+  // Garbage collect dead fish
+  for (let i = fishList.length - 1; i >= 0; i--) {
+    if (!fishList[i].alive) fishList.splice(i, 1);
+  }
+}
 
 // ================================================================
 // CAMERA CONTROLS
@@ -815,6 +967,9 @@ function animate(now) {
     boids(fishList[i], fishList, dt);
     fishList[i].update(dt, time);
   }
+
+  // Ecosystem tick
+  updateEcosystem(dt);
 
   renderer.render(scene, camera);
 }
