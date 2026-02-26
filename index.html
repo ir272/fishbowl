@@ -103,6 +103,17 @@ canvas{display:block}
   line-height:1.7;font-family:monospace;
   opacity:0;transition:opacity 0.5s;
 }
+#underwater-indicator{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  color:rgba(100,180,255,0.15);font-size:48px;letter-spacing:8px;
+  text-transform:uppercase;pointer-events:none;z-index:10;
+  display:none;font-weight:200;
+}
+#screenshot-flash{
+  position:fixed;top:0;left:0;right:0;bottom:0;
+  background:white;pointer-events:none;z-index:100;
+  opacity:0;transition:opacity 0.15s;
+}
 .vignette{
   position:fixed;top:0;left:0;right:0;bottom:0;
   pointer-events:none;z-index:1;
@@ -144,7 +155,9 @@ canvas{display:block}
 <div id="pause-overlay"><span>Paused</span></div>
 <div id="fps-counter"></div>
 <div id="follow-label"></div>
-<div id="keyboard-help">Space — Pause&ensp;|&ensp;F — Feed&ensp;|&ensp;+/- — Speed<br>R — Reset view&ensp;|&ensp;H — This help&ensp;|&ensp;Click fish — Follow<br>Esc — Stop following</div>
+<div id="underwater-indicator">Dive Mode</div>
+<div id="screenshot-flash"></div>
+<div id="keyboard-help">Space — Pause&ensp;|&ensp;F — Feed&ensp;|&ensp;+/- — Speed<br>R — Reset view&ensp;|&ensp;H — This help&ensp;|&ensp;Click fish — Follow<br>U — Dive mode&ensp;|&ensp;S — Screenshot&ensp;|&ensp;Esc — Exit</div>
 <div class="vignette"></div>
 <div class="hint">
   Click to feed<br>
@@ -979,7 +992,7 @@ function createGodRay(x, z, width, angle) {
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
-    uniforms: { uTime: { value: 0 }, uOffset: { value: Math.random() * 10 } },
+    uniforms: { uTime: { value: 0 }, uOffset: { value: Math.random() * 10 }, uIntensity: { value: 1.0 } },
     vertexShader: `
       varying vec2 vUv;
       void main() {
@@ -990,6 +1003,7 @@ function createGodRay(x, z, width, angle) {
     fragmentShader: `
       uniform float uTime;
       uniform float uOffset;
+      uniform float uIntensity;
       varying vec2 vUv;
       void main() {
         float y = vUv.y;
@@ -997,6 +1011,7 @@ function createGodRay(x, z, width, angle) {
         float beam = y * (1.0 - x * x) * 0.07;
         beam *= 0.5 + 0.5 * sin(uTime * 0.2 + uOffset + y * 2.0);
         beam *= 0.7 + 0.3 * sin(uTime * 0.15 + uOffset * 2.0);
+        beam *= uIntensity;
         gl_FragColor = vec4(0.45, 0.65, 0.9, beam);
       }
     `
@@ -2168,9 +2183,11 @@ document.addEventListener('keydown', e => {
   }
   if (key === '=' || key === '+') { simSpeed = Math.min(3, simSpeed + 0.5); updateSpeedHUD(); }
   if (key === '-') { simSpeed = Math.max(0.25, simSpeed - 0.25); updateSpeedHUD(); }
-  if (key === 'r') { camRadius = 13; camPhi = 1.05; camTheta = 0; stopFollowing(); }
-  if (key === 'escape') stopFollowing();
+  if (key === 'r') { camRadius = 13; camRadiusTarget = 13; camPhi = 1.05; camTheta = 0; stopFollowing(); underwaterMode = false; underwaterIndicator.style.display = 'none'; }
+  if (key === 'escape') { stopFollowing(); if (underwaterMode) { underwaterMode = false; underwaterIndicator.style.display = 'none'; camRadiusTarget = 13; } }
   if (key === 'h') { helpVisible = !helpVisible; keyboardHelp.style.opacity = helpVisible ? '1' : '0'; }
+  if (key === 'u') toggleUnderwaterMode();
+  if (key === 's') takeScreenshot();
 });
 
 const simSpeedEl = document.getElementById('sim-speed');
@@ -2181,6 +2198,53 @@ function updateSpeedHUD() {
     simSpeedEl.style.display = 'block';
     simSpeedEl.textContent = 'Speed: ' + simSpeed.toFixed(1) + 'x';
   }
+}
+
+// ================================================================
+// UNDERWATER / DIVE MODE
+// ================================================================
+
+let underwaterMode = false;
+const underwaterIndicator = document.getElementById('underwater-indicator');
+
+function toggleUnderwaterMode() {
+  underwaterMode = !underwaterMode;
+  underwaterIndicator.style.display = underwaterMode ? 'block' : 'none';
+  if (underwaterMode) {
+    camRadiusTarget = 3;
+    camPhi = Math.PI / 2; // eye-level
+    stopFollowing();
+    showEvent('Entering dive mode...');
+    // Fade out indicator
+    setTimeout(() => { underwaterIndicator.style.display = 'none'; }, 2000);
+  } else {
+    camRadiusTarget = 13;
+    showEvent('Exiting dive mode');
+  }
+}
+
+// ================================================================
+// SCREENSHOT
+// ================================================================
+
+const screenshotFlash = document.getElementById('screenshot-flash');
+
+function takeScreenshot() {
+  // Flash effect
+  screenshotFlash.style.transition = 'none';
+  screenshotFlash.style.opacity = '0.7';
+  requestAnimationFrame(() => {
+    screenshotFlash.style.transition = 'opacity 0.4s ease-out';
+    screenshotFlash.style.opacity = '0';
+  });
+  // Capture canvas
+  renderer.render(scene, camera);
+  const dataURL = renderer.domElement.toDataURL('image/png');
+  const link = document.createElement('a');
+  link.download = 'fishbowl-' + Date.now() + '.png';
+  link.href = dataURL;
+  link.click();
+  showEvent('Screenshot saved!');
 }
 
 // ================================================================
@@ -2398,19 +2462,36 @@ function animate(now) {
   if (followedFish && (!followedFish.alive || followedFish.dying)) stopFollowing();
 
   // Auto-rotate when not dragging
-  if (!dragging && !followedFish) camTheta += 0.04 * dt;
+  if (!dragging && !followedFish) camTheta += (underwaterMode ? 0.015 : 0.04) * dt;
 
   // Update camera
   let lookTarget;
   if (followedFish) {
     lookTarget = followedFish.pos;
-    // Orbit around the followed fish
     const fCamRadius = Math.min(camRadius, 6);
     camera.position.set(
       followedFish.pos.x + fCamRadius * Math.sin(camPhi) * Math.sin(camTheta),
       followedFish.pos.y + fCamRadius * Math.cos(camPhi),
       followedFish.pos.z + fCamRadius * Math.sin(camPhi) * Math.cos(camTheta)
     );
+  } else if (underwaterMode) {
+    // Dive mode: camera inside the bowl, looking outward
+    const diveY = SAND_Y + 2.0 + Math.sin(time * 0.3) * 0.3; // gentle bob
+    const diveR = Math.min(camRadius, 2.5);
+    camera.position.set(
+      diveR * Math.sin(camTheta) * 0.5,
+      diveY,
+      diveR * Math.cos(camTheta) * 0.5
+    );
+    // Look direction based on phi/theta
+    lookTarget = new THREE.Vector3(
+      camera.position.x + Math.sin(camPhi) * Math.sin(camTheta) * 3,
+      camera.position.y + Math.cos(camPhi) * 0.5,
+      camera.position.z + Math.sin(camPhi) * Math.cos(camTheta) * 3
+    );
+    // Reduce FOV underwater for immersion
+    camera.fov += (55 - camera.fov) * 0.05;
+    camera.updateProjectionMatrix();
   } else {
     lookTarget = new THREE.Vector3(0, -0.5, 0);
     camera.position.set(
@@ -2418,6 +2499,9 @@ function animate(now) {
       camRadius * Math.cos(camPhi),
       camRadius * Math.sin(camPhi) * Math.cos(camTheta)
     );
+    // Restore FOV when not underwater
+    camera.fov += (45 - camera.fov) * 0.05;
+    camera.updateProjectionMatrix();
   }
   camera.lookAt(lookTarget);
 
@@ -2430,14 +2514,18 @@ function animate(now) {
   // Sand caustics
   sandMat.uniforms.uTime.value = time;
 
-  // God rays
-  for (const grMat of godRays) grMat.uniforms.uTime.value = time;
+  // God rays — dimmed at night
+  const godRayIntensity = dayLight.sunIntensity;
+  for (const grMat of godRays) {
+    grMat.uniforms.uTime.value = time;
+    grMat.uniforms.uIntensity.value = godRayIntensity;
+  }
 
   // Background color shift + day phase
   bgMat.uniforms.uTime.value = time;
   bgMat.uniforms.uDayPhase.value = dayPhase;
 
-  // Particle drift
+  // Particle drift + bioluminescence at night
   const pp = particleGeo.attributes.position;
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     let y = pp.getY(i) + particleSpeeds[i] * dt * 60;
@@ -2450,6 +2538,10 @@ function animate(now) {
     pp.setY(i, y);
   }
   pp.needsUpdate = true;
+  // Plankton glow brighter at night (bioluminescence)
+  const nightFactor = dayPhase >= 0.65 ? 1.0 : dayPhase >= 0.5 ? (dayPhase - 0.5) / 0.15 : 0;
+  particles.material.opacity = 0.5 + nightFactor * 0.5;
+  particles.material.size = 0.06 + nightFactor * 0.04;
 
   // Bubble rise
   const bp = bubbleGeo.attributes.position;
