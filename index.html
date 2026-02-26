@@ -55,6 +55,35 @@ canvas{display:block}
   pointer-events:none;z-index:10;text-align:right;
   line-height:1.6;
 }
+#event-log{
+  position:fixed;top:24px;left:50%;transform:translateX(-50%);
+  pointer-events:none;z-index:10;display:flex;flex-direction:column;
+  align-items:center;gap:6px;
+}
+.event-msg{
+  background:rgba(5,10,25,0.6);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid rgba(100,140,200,0.12);
+  border-radius:20px;padding:6px 16px;
+  color:rgba(200,215,240,0.85);font-size:12px;
+  letter-spacing:0.3px;white-space:nowrap;
+  animation:eventFade 4s ease-out forwards;
+}
+@keyframes eventFade{
+  0%{opacity:0;transform:translateY(10px)}
+  10%{opacity:1;transform:translateY(0)}
+  70%{opacity:1}
+  100%{opacity:0;transform:translateY(-5px)}
+}
+#pause-overlay{
+  position:fixed;top:0;left:0;right:0;bottom:0;
+  background:rgba(0,0,0,0.3);z-index:20;
+  display:none;align-items:center;justify-content:center;
+}
+#pause-overlay span{
+  color:rgba(200,220,255,0.6);font-size:24px;letter-spacing:4px;
+  text-transform:uppercase;
+}
 .vignette{
   position:fixed;top:0;left:0;right:0;bottom:0;
   pointer-events:none;z-index:1;
@@ -83,9 +112,12 @@ canvas{display:block}
     </div>
     <div class="hud-day" id="day-counter">Day 1</div>
     <div class="hud-day" id="time-of-day" style="border:none;margin-top:4px;padding-top:0"></div>
+    <div class="hud-day" id="sim-speed" style="border:none;margin-top:2px;padding-top:0;display:none"></div>
     <button id="feed-btn">Drop Food</button>
   </div>
 </div>
+<div id="event-log"></div>
+<div id="pause-overlay"><span>Paused</span></div>
 <div class="vignette"></div>
 <div class="hint">
   Click to feed<br>
@@ -1450,8 +1482,8 @@ function checkEating() {
         if (counts[prey.speciesKey] > prey.species.minPop) {
           prey.dying = true;
           prey.opacity = prey.mat.uniforms.uOpacity.value;
-          // Predator grows slightly
           pred.mesh.scale.multiplyScalar(1.01);
+          showEvent(`${pred.species.name} caught a ${prey.species.name}`);
         }
       }
     }
@@ -1482,6 +1514,7 @@ function updateEcosystem(dt) {
         );
         const baby = new Fish(sp, key, parent.pos.clone().add(offset));
         fishList.push(baby);
+        showEvent(`A baby ${sp.name} was born!`);
       }
     }
   }
@@ -1494,6 +1527,7 @@ function updateEcosystem(dt) {
       if (counts2[f.speciesKey] > f.species.minPop) {
         f.dying = true;
         f.opacity = f.mat.uniforms.uOpacity.value;
+        showEvent(`A ${f.species.name} passed away`);
       }
     }
   }
@@ -1527,8 +1561,43 @@ const foodParticles = [];
 let mouseWorldPos = null;
 let mouseScreenX = innerWidth / 2, mouseScreenY = innerHeight / 2;
 
+// Splash ripples on water surface
+const splashRipples = [];
+function createSplashRipple(x, z) {
+  const geo = new THREE.RingGeometry(0.01, 0.05, 32);
+  geo.rotateX(-Math.PI / 2);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xaaccff, transparent: true, opacity: 0.6,
+    depthWrite: false, side: THREE.DoubleSide
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, WATER_Y + 0.01, z);
+  scene.add(mesh);
+  splashRipples.push({ mesh, mat, age: 0, maxAge: 1.5 });
+}
+
+function updateSplashRipples(dt) {
+  for (let i = splashRipples.length - 1; i >= 0; i--) {
+    const r = splashRipples[i];
+    r.age += dt;
+    const t = r.age / r.maxAge;
+    const scale = 1 + t * 25;
+    r.mesh.scale.set(scale, 1, scale);
+    r.mat.opacity = 0.5 * (1 - t * t);
+    if (r.age >= r.maxAge) {
+      scene.remove(r.mesh);
+      r.mesh.geometry.dispose();
+      r.mat.dispose();
+      splashRipples.splice(i, 1);
+    }
+  }
+}
+
 function dropFood(worldPos) {
   const count = 3 + Math.floor(Math.random() * 3);
+  // Splash ripple at impact point
+  createSplashRipple(worldPos.x, worldPos.z);
+  if (Math.random() > 0.3) createSplashRipple(worldPos.x + (Math.random() - 0.5) * 0.3, worldPos.z + (Math.random() - 0.5) * 0.3);
   for (let i = 0; i < count; i++) {
     const geo = new THREE.SphereGeometry(0.04, 6, 6);
     const mat = new THREE.MeshStandardMaterial({
@@ -1710,6 +1779,61 @@ document.getElementById('feed-btn').addEventListener('click', e => {
   dropFood(pos);
 });
 
+// ================================================================
+// EVENT NOTIFICATIONS
+// ================================================================
+
+const eventLog = document.getElementById('event-log');
+let eventCount = 0;
+
+function showEvent(msg) {
+  const el = document.createElement('div');
+  el.className = 'event-msg';
+  el.textContent = msg;
+  eventLog.appendChild(el);
+  eventCount++;
+  // Remove after animation
+  setTimeout(() => { el.remove(); }, 4000);
+  // Keep max 4 events visible
+  while (eventLog.children.length > 4) eventLog.firstChild.remove();
+}
+
+// ================================================================
+// KEYBOARD SHORTCUTS + PAUSE
+// ================================================================
+
+let paused = false;
+let simSpeed = 1;
+const pauseOverlay = document.getElementById('pause-overlay');
+
+document.addEventListener('keydown', e => {
+  const key = e.key.toLowerCase();
+  if (key === ' ' || key === 'p') {
+    e.preventDefault();
+    paused = !paused;
+    pauseOverlay.style.display = paused ? 'flex' : 'none';
+  }
+  if (key === 'f') {
+    // Drop food at center
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * 1.5;
+    dropFood(new THREE.Vector3(Math.cos(angle) * r, WATER_Y, Math.sin(angle) * r));
+  }
+  if (key === '=' || key === '+') { simSpeed = Math.min(3, simSpeed + 0.5); updateSpeedHUD(); }
+  if (key === '-') { simSpeed = Math.max(0.25, simSpeed - 0.25); updateSpeedHUD(); }
+  if (key === 'r') { camRadius = 13; camPhi = 1.05; camTheta = 0; }
+});
+
+const simSpeedEl = document.getElementById('sim-speed');
+function updateSpeedHUD() {
+  if (simSpeed === 1) {
+    simSpeedEl.style.display = 'none';
+  } else {
+    simSpeedEl.style.display = 'block';
+    simSpeedEl.textContent = 'Speed: ' + simSpeed.toFixed(1) + 'x';
+  }
+}
+
 // Fade out hint after 8 seconds
 const hintEl = document.querySelector('.hint');
 setTimeout(() => {
@@ -1789,9 +1913,16 @@ let lastTime = 0;
 function animate(now) {
   requestAnimationFrame(animate);
   const time = now * 0.001;
-  const dt = Math.min(time - lastTime, 0.05);
+  let dt = Math.min(time - lastTime, 0.05);
   lastTime = time;
   if (dt <= 0) return;
+
+  // Pause support
+  if (paused) {
+    renderer.render(scene, camera);
+    return;
+  }
+  dt *= simSpeed;
 
   // Day/night cycle
   const dayPhase = getDayPhase(time);
@@ -1874,6 +2005,9 @@ function animate(now) {
 
   // Food particles
   updateFood(dt);
+
+  // Splash ripples
+  updateSplashRipples(dt);
 
   // Mouse scatter update
   if (!dragging) updateMouseScatter();
