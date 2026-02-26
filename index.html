@@ -1411,6 +1411,27 @@ const bgMat = new THREE.ShaderMaterial({
       float horizonGlow = exp(-abs(y) * 4.0) * dawnMix * 0.3;
       c += dawnAccent * horizonGlow;
 
+      // Animated clouds during day (soft noise patches)
+      float cloudDensity = 1.0 - nightMix;
+      if (cloudDensity > 0.1 && y > -0.1) {
+        vec2 cloudUV = dir.xz / (y + 1.0) * 3.0 + uTime * 0.015;
+        float cloud = hash(floor(cloudUV * 2.0)) * 0.5;
+        cloud += hash(floor(cloudUV * 4.0 + 1.5)) * 0.3;
+        cloud += hash(floor(cloudUV * 8.0 + 3.7)) * 0.2;
+        cloud = smoothstep(0.55, 0.75, cloud);
+        cloud *= smoothstep(-0.1, 0.2, y) * cloudDensity * 0.04;
+        c += cloud * vec3(0.4, 0.5, 0.7);
+      }
+
+      // Nebula glow at night (subtle colorful haze)
+      if (nightMix > 0.3) {
+        vec2 nebUV = dir.xz * 2.0 + dir.y;
+        float neb = hash(floor(nebUV * 1.5)) * 0.6 + hash(floor(nebUV * 3.0 + 5.0)) * 0.4;
+        neb = smoothstep(0.4, 0.8, neb) * nightMix * 0.03;
+        vec3 nebColor = vec3(0.2, 0.1, 0.4) + vec3(0.1, 0.0, 0.2) * hash(floor(nebUV));
+        c += neb * nebColor * smoothstep(-0.3, 0.2, y);
+      }
+
       // Bokeh dots (brighter at night)
       float bokehStrength = 0.5 + nightMix * 1.5;
       float b = bokeh(dir, 0.0) + bokeh(dir, 3.7) * 0.6;
@@ -2165,6 +2186,7 @@ function checkEating() {
           pred.mesh.scale.multiplyScalar(1.01);
           ecoStats.meals++;
           showEvent(`${pred.species.name} caught a ${prey.species.name}`);
+          playEcoSound('eat');
         }
       }
     }
@@ -2197,6 +2219,7 @@ function updateEcosystem(dt) {
         fishList.push(baby);
         ecoStats.births++;
         showEvent(`A baby ${sp.name} was born!`);
+        playEcoSound('birth');
       }
     }
   }
@@ -2211,6 +2234,7 @@ function updateEcosystem(dt) {
         f.opacity = f.mat.uniforms.uOpacity.value;
         ecoStats.deaths++;
         showEvent(`A ${f.species.name} passed away`);
+        playEcoSound('death');
       }
     }
   }
@@ -3009,6 +3033,47 @@ function initAudio() {
     setTimeout(playTone, (duration * 0.6 + Math.random() * 2) * 1000);
   }
   setTimeout(playTone, 3000);
+}
+
+// Ecosystem event sounds
+function playEcoSound(type) {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 1500;
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  if (type === 'birth') {
+    // Rising cheerful tone
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(440, now);
+    osc.frequency.exponentialRampToValueAtTime(880, now + 0.2);
+    gain.gain.setValueAtTime(0.03, now);
+    gain.gain.linearRampToValueAtTime(0.001, now + 0.4);
+    osc.start(now); osc.stop(now + 0.4);
+  } else if (type === 'eat') {
+    // Quick snap sound
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(300, now);
+    osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+    gain.gain.setValueAtTime(0.025, now);
+    gain.gain.linearRampToValueAtTime(0.001, now + 0.15);
+    osc.start(now); osc.stop(now + 0.15);
+  } else if (type === 'death') {
+    // Descending somber tone
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(330, now);
+    osc.frequency.exponentialRampToValueAtTime(165, now + 0.5);
+    gain.gain.setValueAtTime(0.02, now);
+    gain.gain.linearRampToValueAtTime(0.001, now + 0.6);
+    filter.frequency.value = 800;
+    osc.start(now); osc.stop(now + 0.6);
+  }
 }
 
 // Start audio on first user interaction (browsers require user gesture)
