@@ -776,6 +776,49 @@ anemones.push(createAnemone(-1.8, -1.2, 0xff4488, 14, 0.4));
 anemones.push(createAnemone(1.0, 2.0, 0xff6633, 10, 0.3));
 anemones.push(createAnemone(0.5, -0.8, 0xcc55aa, 12, 0.35));
 
+// Anemone fireflies — tiny glowing particles that orbit anemones at night
+const FIREFLY_COUNT = 18;
+const fireflyPositions = new Float32Array(FIREFLY_COUNT * 3);
+const fireflyData = [];
+const anemonePositions = [
+  { x: -1.8, z: -1.2 }, { x: 1.0, z: 2.0 }, { x: 0.5, z: -0.8 }
+];
+for (let i = 0; i < FIREFLY_COUNT; i++) {
+  const ap = anemonePositions[i % anemonePositions.length];
+  const angle = rng() * Math.PI * 2;
+  const r = 0.2 + rng() * 0.5;
+  fireflyPositions[i * 3] = ap.x + Math.cos(angle) * r;
+  fireflyPositions[i * 3 + 1] = SAND_Y + 0.3 + rng() * 1.0;
+  fireflyPositions[i * 3 + 2] = ap.z + Math.sin(angle) * r;
+  fireflyData.push({
+    centerX: ap.x, centerZ: ap.z,
+    orbitR: r, orbitSpeed: 0.3 + rng() * 0.5,
+    phase: rng() * Math.PI * 2,
+    bobSpeed: 1.0 + rng() * 1.5,
+    bobPhase: rng() * Math.PI * 2,
+    baseY: SAND_Y + 0.3 + rng() * 1.0
+  });
+}
+const fireflyGeo = new THREE.BufferGeometry();
+fireflyGeo.setAttribute('position', new THREE.Float32BufferAttribute(fireflyPositions, 3));
+
+const ffCanvas = document.createElement('canvas');
+ffCanvas.width = ffCanvas.height = 32;
+const ffCtx = ffCanvas.getContext('2d');
+const ffGrad = ffCtx.createRadialGradient(16, 16, 0, 16, 16, 16);
+ffGrad.addColorStop(0, 'rgba(120,255,180,0.9)');
+ffGrad.addColorStop(0.3, 'rgba(100,255,160,0.5)');
+ffGrad.addColorStop(1, 'rgba(60,200,120,0)');
+ffCtx.fillStyle = ffGrad;
+ffCtx.fillRect(0, 0, 32, 32);
+const ffTex = new THREE.CanvasTexture(ffCanvas);
+
+const fireflies = new THREE.Points(fireflyGeo, new THREE.PointsMaterial({
+  map: ffTex, size: 0.1, transparent: true, opacity: 0,
+  blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true
+}));
+scene.add(fireflies);
+
 // Starfish on sand
 function createStarfish(x, z, color, size) {
   const group = new THREE.Group();
@@ -1452,7 +1495,8 @@ class Fish {
         uTime: { value: 0 },
         uIridescence: { value: speciesKey === 'small' ? 0.4 : speciesKey === 'large' ? 0.6 : 0.3 },
         uWaterY: { value: WATER_Y },
-        uSandY: { value: SAND_Y }
+        uSandY: { value: SAND_Y },
+        uSchoolPulse: { value: 0.0 }
       },
       vertexShader: `
         varying vec3 vNormal;
@@ -1475,6 +1519,7 @@ class Fish {
         uniform float uIridescence;
         uniform float uWaterY;
         uniform float uSandY;
+        uniform float uSchoolPulse;
         varying vec3 vNormal;
         varying vec3 vViewDir;
         varying vec2 vUv;
@@ -1497,6 +1542,10 @@ class Fish {
 
           vec3 color = uColor * diff;
           color = mix(color, iridColor * diff, uIridescence * iridAngle);
+
+          // School pulse — synchronized shimmer when schooling tightly
+          float pulse = uSchoolPulse * sin(uTime * 8.0 + vWorldPos.x * 3.0 + vWorldPos.z * 3.0) * 0.15;
+          color += pulse * vec3(0.3, 0.5, 1.0);
 
           // Specular
           vec3 h = normalize(lightDir + vViewDir);
@@ -3058,6 +3107,18 @@ function animate(now) {
   // Anemone tentacles
   anemones.forEach(a => { a.mat.uniforms.uTime.value = time; });
 
+  // Anemone fireflies — glow and orbit at night
+  const ffp = fireflyGeo.attributes.position;
+  fireflies.material.opacity = nightFactor * 0.8;
+  for (let i = 0; i < FIREFLY_COUNT; i++) {
+    const fd = fireflyData[i];
+    const angle = fd.phase + time * fd.orbitSpeed;
+    ffp.setX(i, fd.centerX + Math.cos(angle) * fd.orbitR);
+    ffp.setZ(i, fd.centerZ + Math.sin(angle) * fd.orbitR);
+    ffp.setY(i, fd.baseY + Math.sin(time * fd.bobSpeed + fd.bobPhase) * 0.15);
+  }
+  ffp.needsUpdate = true;
+
   // Coral polyp animation — gentle pulsing and swaying
   for (let i = 0; i < coralPolyps.length; i++) {
     const cp = coralPolyps[i];
@@ -3075,12 +3136,30 @@ function animate(now) {
     }
   }
 
+  // Compute school pulse for tetras — synchronized shimmer when close together
+  let schoolPulse = 0;
+  const tetras = fishList.filter(f => f.alive && f.speciesKey === 'small');
+  if (tetras.length >= 3) {
+    let closeCount = 0;
+    for (let i = 0; i < tetras.length; i++) {
+      for (let j = i + 1; j < tetras.length; j++) {
+        if (tetras[i].pos.distanceTo(tetras[j].pos) < 1.5) closeCount++;
+      }
+    }
+    const maxPairs = tetras.length * (tetras.length - 1) / 2;
+    schoolPulse = Math.min(1.0, closeCount / Math.max(1, maxPairs * 0.5));
+  }
+
   // Fish boids + update
   const eyeGlowAmount = nightFactor * 0.3;
   for (let i = 0; i < fishList.length; i++) {
     if (!fishList[i].alive) continue;
     boids(fishList[i], fishList, dt);
     fishList[i].update(dt, time);
+    // School pulse for tetras
+    if (fishList[i].speciesKey === 'small') {
+      fishList[i].mat.uniforms.uSchoolPulse.value += (schoolPulse - fishList[i].mat.uniforms.uSchoolPulse.value) * Math.min(1, dt * 3);
+    }
     // Eye glow at night
     if (fishList[i].eyeMat) {
       fishList[i].eyeMat.emissiveIntensity = eyeGlowAmount;
