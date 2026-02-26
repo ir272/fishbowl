@@ -134,7 +134,8 @@ const glassMat = new THREE.ShaderMaterial({
   `
 });
 
-scene.add(new THREE.Mesh(bowlGeo, glassMat));
+const bowlMesh = new THREE.Mesh(bowlGeo, glassMat);
+scene.add(bowlMesh);
 
 // Bowl rim
 const rimGeo = new THREE.TorusGeometry(BOWL_OPENING_R, 0.1, 12, 64);
@@ -868,6 +869,34 @@ function boids(fish, allFish, dt) {
       fish.applyForce(_steer);
     }
   }
+
+  // Food attraction
+  if (foodParticles.length > 0) {
+    let closestFood = null, closestFoodDist = Infinity;
+    for (const food of foodParticles) {
+      if (food.eaten) continue;
+      const d = fish.pos.distanceTo(food.pos);
+      if (d < closestFoodDist && d < sp.neighborDist * 3) {
+        closestFoodDist = d;
+        closestFood = food;
+      }
+    }
+    if (closestFood) {
+      _steer.subVectors(closestFood.pos, fish.pos).normalize().multiplyScalar(sp.maxForce * 2.5);
+      fish.applyForce(_steer);
+      if (closestFoodDist < sp.size * 1.5) closestFood.eaten = true;
+    }
+  }
+
+  // Mouse scatter — flee from mouse near glass
+  if (mouseWorldPos) {
+    const dist = fish.pos.distanceTo(mouseWorldPos);
+    if (dist < 2.5) {
+      _steer.subVectors(fish.pos, mouseWorldPos).normalize();
+      _steer.multiplyScalar(sp.maxForce * 4 / Math.max(dist * 0.5, 0.3));
+      fish.applyForce(_steer);
+    }
+  }
 }
 
 // Species definitions
@@ -1036,24 +1065,117 @@ function updateEcosystem(dt) {
 }
 
 // ================================================================
+// INTERACTION — feeding, mouse scatter
+// ================================================================
+
+const raycaster = new THREE.Raycaster();
+const mouseNDC = new THREE.Vector2();
+const foodParticles = [];
+let mouseWorldPos = null;
+let mouseScreenX = innerWidth / 2, mouseScreenY = innerHeight / 2;
+
+function dropFood(worldPos) {
+  const count = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i++) {
+    const geo = new THREE.SphereGeometry(0.04, 6, 6);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffbb55, emissive: 0x553311, emissiveIntensity: 0.5, roughness: 0.3
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    const offset = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.4, 0, (Math.random() - 0.5) * 0.4
+    );
+    mesh.position.copy(worldPos).add(offset);
+    scene.add(mesh);
+    foodParticles.push({
+      mesh,
+      pos: mesh.position.clone(),
+      vel: new THREE.Vector3((Math.random() - 0.5) * 0.1, -0.4, (Math.random() - 0.5) * 0.1),
+      life: 20,
+      eaten: false
+    });
+  }
+}
+
+function updateFood(dt) {
+  for (let i = foodParticles.length - 1; i >= 0; i--) {
+    const f = foodParticles[i];
+    f.life -= dt;
+    f.pos.addScaledVector(f.vel, dt);
+    f.vel.y *= 0.98;
+    if (f.pos.y < SAND_Y + 0.1) { f.pos.y = SAND_Y + 0.1; f.vel.set(0, 0, 0); }
+    f.mesh.position.copy(f.pos);
+    // Fade out near end of life
+    if (f.life < 3) f.mesh.material.opacity = f.life / 3;
+    if (f.life <= 0 || f.eaten) {
+      scene.remove(f.mesh);
+      f.mesh.geometry.dispose();
+      f.mesh.material.dispose();
+      foodParticles.splice(i, 1);
+    }
+  }
+}
+
+function handleClick(e) {
+  mouseNDC.set(
+    (e.clientX / innerWidth) * 2 - 1,
+    -(e.clientY / innerHeight) * 2 + 1
+  );
+  raycaster.setFromCamera(mouseNDC, camera);
+  const waterPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -WATER_Y);
+  const hit = new THREE.Vector3();
+  raycaster.ray.intersectPlane(waterPlane, hit);
+  if (hit) {
+    const dist = Math.sqrt(hit.x * hit.x + hit.z * hit.z);
+    const maxR = Math.sqrt(BOWL_RADIUS * BOWL_RADIUS - WATER_Y * WATER_Y) - 0.3;
+    if (dist < maxR) dropFood(hit);
+  }
+}
+
+function updateMouseScatter() {
+  mouseNDC.set(
+    (mouseScreenX / innerWidth) * 2 - 1,
+    -(mouseScreenY / innerHeight) * 2 + 1
+  );
+  raycaster.setFromCamera(mouseNDC, camera);
+  // Intersect ray with bowl sphere
+  const o = raycaster.ray.origin, d = raycaster.ray.direction;
+  const a = d.dot(d), b = 2 * o.dot(d), c = o.dot(o) - BOWL_RADIUS * BOWL_RADIUS;
+  const disc = b * b - 4 * a * c;
+  if (disc >= 0) {
+    const t = (-b - Math.sqrt(disc)) / (2 * a);
+    if (t > 0) { mouseWorldPos = o.clone().addScaledVector(d, t); return; }
+  }
+  mouseWorldPos = null;
+}
+
+// ================================================================
 // CAMERA CONTROLS
 // ================================================================
 
 let camRadius = 13, camPhi = 1.05, camTheta = 0;
 let dragging = false, prevMX = 0, prevMY = 0;
+let clickStartX = 0, clickStartY = 0;
 const canvas = renderer.domElement;
 
 canvas.addEventListener('mousedown', e => {
   dragging = true; prevMX = e.clientX; prevMY = e.clientY;
+  clickStartX = e.clientX; clickStartY = e.clientY;
 });
 canvas.addEventListener('mousemove', e => {
+  mouseScreenX = e.clientX;
+  mouseScreenY = e.clientY;
   if (!dragging) return;
   camTheta -= (e.clientX - prevMX) * 0.005;
   camPhi = Math.max(0.3, Math.min(Math.PI * 0.48, camPhi - (e.clientY - prevMY) * 0.005));
   prevMX = e.clientX; prevMY = e.clientY;
 });
-canvas.addEventListener('mouseup', () => dragging = false);
-canvas.addEventListener('mouseleave', () => dragging = false);
+canvas.addEventListener('mouseup', e => {
+  dragging = false;
+  const dx = e.clientX - clickStartX, dy = e.clientY - clickStartY;
+  if (dx * dx + dy * dy < 25) handleClick(e);
+});
+canvas.addEventListener('mouseleave', () => { dragging = false; mouseWorldPos = null; });
 canvas.addEventListener('wheel', e => {
   camRadius = Math.max(7, Math.min(22, camRadius + e.deltaY * 0.01));
 }, { passive: true });
@@ -1062,8 +1184,8 @@ canvas.addEventListener('wheel', e => {
 canvas.addEventListener('touchstart', e => {
   if (e.touches.length === 1) {
     dragging = true;
-    prevMX = e.touches[0].clientX;
-    prevMY = e.touches[0].clientY;
+    prevMX = e.touches[0].clientX; prevMY = e.touches[0].clientY;
+    clickStartX = prevMX; clickStartY = prevMY;
   }
 }, { passive: true });
 canvas.addEventListener('touchmove', e => {
@@ -1072,7 +1194,11 @@ canvas.addEventListener('touchmove', e => {
   camPhi = Math.max(0.3, Math.min(Math.PI * 0.48, camPhi - (e.touches[0].clientY - prevMY) * 0.005));
   prevMX = e.touches[0].clientX; prevMY = e.touches[0].clientY;
 }, { passive: true });
-canvas.addEventListener('touchend', () => dragging = false);
+canvas.addEventListener('touchend', e => {
+  dragging = false;
+  const dx = prevMX - clickStartX, dy = prevMY - clickStartY;
+  if (dx * dx + dy * dy < 25) handleClick({ clientX: prevMX, clientY: prevMY });
+});
 
 // ================================================================
 // RENDER LOOP
@@ -1139,6 +1265,12 @@ function animate(now) {
 
   // Ecosystem tick
   updateEcosystem(dt);
+
+  // Food particles
+  updateFood(dt);
+
+  // Mouse scatter update
+  if (!dragging) updateMouseScatter();
 
   renderer.render(scene, camera);
 }
