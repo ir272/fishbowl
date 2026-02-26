@@ -227,6 +227,7 @@ const glassMat = new THREE.ShaderMaterial({
   transparent: true,
   depthWrite: false,
   side: THREE.DoubleSide,
+  uniforms: { uTime: { value: 0 } },
   vertexShader: `
     varying vec3 vNormal;
     varying vec3 vWorldPos;
@@ -237,8 +238,14 @@ const glassMat = new THREE.ShaderMaterial({
     }
   `,
   fragmentShader: `
+    uniform float uTime;
     varying vec3 vNormal;
     varying vec3 vWorldPos;
+
+    float sparkleHash(vec3 p) {
+      return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    }
+
     void main() {
       vec3 viewDir = normalize(cameraPosition - vWorldPos);
       vec3 n = gl_FrontFacing ? vNormal : -vNormal;
@@ -246,7 +253,6 @@ const glassMat = new THREE.ShaderMaterial({
 
       // Chromatic edge tint
       vec3 baseColor = vec3(0.7, 0.85, 0.95);
-      vec3 edgeColor = vec3(0.8, 0.9, 1.0);
       vec3 rainbowEdge = vec3(0.85 + fresnel * 0.1, 0.9, 1.0 - fresnel * 0.05);
       vec3 color = mix(baseColor, rainbowEdge, fresnel);
 
@@ -262,6 +268,15 @@ const glassMat = new THREE.ShaderMaterial({
       // Glass rim glow
       float rimGlow = pow(fresnel, 5.0) * 0.15;
       color += rimGlow * vec3(0.6, 0.8, 1.0);
+
+      // Animated sparkle — tiny moving glints on glass surface
+      vec3 sparklePos = floor(vWorldPos * 20.0);
+      float sparkle = sparkleHash(sparklePos + floor(uTime * 0.5));
+      if (sparkle > 0.995) {
+        float glint = pow(sparkle - 0.995, 0.3) * 200.0;
+        float sparkleAnim = pow(sin(uTime * 3.0 + sparkleHash(sparklePos) * 6.28) * 0.5 + 0.5, 4.0);
+        color += vec3(1.0, 0.98, 0.95) * glint * sparkleAnim * 0.5;
+      }
 
       float alpha = mix(0.03, 0.28, fresnel) + (spec + spec2) * 0.4 + rimGlow;
       gl_FragColor = vec4(color, alpha);
@@ -1000,6 +1015,28 @@ const bgMat = new THREE.ShaderMaterial({
       float b = bokeh(dir, 0.0) + bokeh(dir, 3.7) * 0.6;
       c += b * vec3(0.15, 0.2, 0.35) * smoothstep(-0.2, 0.3, y) * bokehStrength;
 
+      // Moon glow at night
+      if (nightMix > 0.3) {
+        vec3 moonDir = normalize(vec3(0.5, 0.7, -0.3));
+        float moonDot = max(dot(dir, moonDir), 0.0);
+        float moonGlow = pow(moonDot, 64.0) * 0.4 + pow(moonDot, 8.0) * 0.08;
+        c += moonGlow * nightMix * vec3(0.6, 0.65, 0.8);
+      }
+
+      // Stars at night (tiny bright points in upper hemisphere)
+      if (nightMix > 0.3 && y > 0.0) {
+        vec2 starUV = dir.xz / (y + 0.5) * 30.0;
+        vec2 starID = floor(starUV);
+        float starRnd = hash(starID * 3.14);
+        if (starRnd > 0.97) {
+          vec2 starCenter = vec2(hash(starID * 2.1), hash(starID * 4.3));
+          float starD = length(fract(starUV) - starCenter);
+          float starBright = smoothstep(0.04, 0.0, starD);
+          float twinkle = 0.6 + 0.4 * sin(uTime * (1.0 + starRnd * 3.0) + starRnd * 6.28);
+          c += starBright * twinkle * nightMix * vec3(0.8, 0.85, 1.0) * smoothstep(0.0, 0.3, y);
+        }
+      }
+
       gl_FragColor = vec4(c, 1.0);
     }
   `
@@ -1105,23 +1142,27 @@ class Fish {
 
     const color = species.colors[Math.floor(rng() * species.colors.length)];
     const baseColor = new THREE.Color(color);
-    // Iridescent fish shader
+    // Iridescent fish shader with depth tinting and caustic dappling
     this.mat = new THREE.ShaderMaterial({
       side: THREE.DoubleSide, transparent: true,
       uniforms: {
         uColor: { value: baseColor },
         uOpacity: { value: 0 },
         uTime: { value: 0 },
-        uIridescence: { value: speciesKey === 'small' ? 0.4 : speciesKey === 'large' ? 0.6 : 0.3 }
+        uIridescence: { value: speciesKey === 'small' ? 0.4 : speciesKey === 'large' ? 0.6 : 0.3 },
+        uWaterY: { value: WATER_Y },
+        uSandY: { value: SAND_Y }
       },
       vertexShader: `
         varying vec3 vNormal;
         varying vec3 vViewDir;
         varying vec2 vUv;
+        varying vec3 vWorldPos;
         void main() {
           vUv = uv;
           vNormal = normalize(mat3(modelMatrix) * normal);
           vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
           vViewDir = normalize(cameraPosition - wp.xyz);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
@@ -1131,9 +1172,12 @@ class Fish {
         uniform float uOpacity;
         uniform float uTime;
         uniform float uIridescence;
+        uniform float uWaterY;
+        uniform float uSandY;
         varying vec3 vNormal;
         varying vec3 vViewDir;
         varying vec2 vUv;
+        varying vec3 vWorldPos;
         void main() {
           vec3 n = gl_FrontFacing ? vNormal : -vNormal;
           float NdotV = max(dot(n, vViewDir), 0.0);
@@ -1165,6 +1209,20 @@ class Fish {
           // Scale pattern (subtle)
           float scales = sin(vUv.x * 40.0) * sin(vUv.y * 20.0) * 0.03;
           color += scales;
+
+          // Depth-based blue tinting (deeper = bluer)
+          float depthRatio = clamp((uWaterY - vWorldPos.y) / (uWaterY - uSandY), 0.0, 1.0);
+          vec3 deepTint = vec3(0.15, 0.25, 0.45);
+          color = mix(color, deepTint, depthRatio * 0.3);
+
+          // Caustic light dappling on fish body
+          float cx = vWorldPos.x * 2.0 + uTime * 0.3;
+          float cz = vWorldPos.z * 2.0 + uTime * 0.25;
+          float causticDapple = abs(sin(cx + sin(cz * 1.3)) * sin(cz + sin(cx * 0.7)));
+          causticDapple = pow(causticDapple, 3.0);
+          // Only applies from above (simulating light through water)
+          float topLight = max(dot(n, vec3(0.0, 1.0, 0.0)), 0.0);
+          color += causticDapple * topLight * vec3(0.2, 0.3, 0.4) * (1.0 - depthRatio);
 
           gl_FragColor = vec4(color, uOpacity);
         }
@@ -2061,6 +2119,94 @@ function getDayLighting(phase) {
 }
 
 // ================================================================
+// AMBIENT UNDERWATER AUDIO (Web Audio API)
+// ================================================================
+
+let audioCtx = null, audioStarted = false;
+
+function initAudio() {
+  if (audioStarted) return;
+  audioStarted = true;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const master = audioCtx.createGain();
+  master.gain.value = 0.12;
+  master.connect(audioCtx.destination);
+
+  // Deep underwater rumble — filtered noise
+  const rumbleSize = audioCtx.sampleRate * 4;
+  const rumbleBuffer = audioCtx.createBuffer(1, rumbleSize, audioCtx.sampleRate);
+  const rumbleData = rumbleBuffer.getChannelData(0);
+  for (let i = 0; i < rumbleSize; i++) rumbleData[i] = (Math.random() * 2 - 1);
+  const rumble = audioCtx.createBufferSource();
+  rumble.buffer = rumbleBuffer;
+  rumble.loop = true;
+  const rumbleFilter = audioCtx.createBiquadFilter();
+  rumbleFilter.type = 'lowpass';
+  rumbleFilter.frequency.value = 120;
+  rumbleFilter.Q.value = 0.7;
+  const rumbleGain = audioCtx.createGain();
+  rumbleGain.gain.value = 0.6;
+  rumble.connect(rumbleFilter);
+  rumbleFilter.connect(rumbleGain);
+  rumbleGain.connect(master);
+  rumble.start();
+
+  // Mid-range water ambiance — bandpass filtered noise
+  const ambSize = audioCtx.sampleRate * 3;
+  const ambBuffer = audioCtx.createBuffer(1, ambSize, audioCtx.sampleRate);
+  const ambData = ambBuffer.getChannelData(0);
+  for (let i = 0; i < ambSize; i++) ambData[i] = (Math.random() * 2 - 1);
+  const amb = audioCtx.createBufferSource();
+  amb.buffer = ambBuffer;
+  amb.loop = true;
+  const ambFilter = audioCtx.createBiquadFilter();
+  ambFilter.type = 'bandpass';
+  ambFilter.frequency.value = 500;
+  ambFilter.Q.value = 0.5;
+  const ambGain = audioCtx.createGain();
+  ambGain.gain.value = 0.15;
+  amb.connect(ambFilter);
+  ambFilter.connect(ambGain);
+  ambGain.connect(master);
+  amb.start();
+
+  // Periodic bubble sounds
+  function playBubble() {
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    const baseFreq = 600 + Math.random() * 800;
+    osc.frequency.setValueAtTime(baseFreq, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 2.5, audioCtx.currentTime + 0.08);
+    const bGain = audioCtx.createGain();
+    bGain.gain.setValueAtTime(0.06 + Math.random() * 0.04, audioCtx.currentTime);
+    bGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+    const bFilter = audioCtx.createBiquadFilter();
+    bFilter.type = 'bandpass';
+    bFilter.frequency.value = 1200;
+    bFilter.Q.value = 2;
+    osc.connect(bFilter);
+    bFilter.connect(bGain);
+    bGain.connect(master);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.2);
+    // Schedule next bubble
+    setTimeout(playBubble, 2000 + Math.random() * 6000);
+  }
+  setTimeout(playBubble, 1000);
+}
+
+// Start audio on first user interaction (browsers require user gesture)
+function tryStartAudio() {
+  initAudio();
+  document.removeEventListener('click', tryStartAudio);
+  document.removeEventListener('touchstart', tryStartAudio);
+  document.removeEventListener('keydown', tryStartAudio);
+}
+document.addEventListener('click', tryStartAudio);
+document.addEventListener('touchstart', tryStartAudio);
+document.addEventListener('keydown', tryStartAudio);
+
+// ================================================================
 // RENDER LOOP
 // ================================================================
 
@@ -2123,6 +2269,9 @@ function animate(now) {
     );
   }
   camera.lookAt(lookTarget);
+
+  // Glass sparkle
+  glassMat.uniforms.uTime.value = time;
 
   // Water waves
   waterMat.uniforms.uTime.value = time;
