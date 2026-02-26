@@ -329,16 +329,27 @@ const bowlMesh = new THREE.Mesh(bowlGeo, glassMat);
 bowlMesh.renderOrder = 10; // Render glass after interior objects for proper transparency
 scene.add(bowlMesh);
 
-// Bowl rim
+// Bowl rim — bright glass edge with specular highlights
 const rimGeo = new THREE.TorusGeometry(BOWL_OPENING_R, 0.1, 12, 64);
 const rimMat = new THREE.MeshStandardMaterial({
-  color: 0xbbccdd, roughness: 0.05, metalness: 0.2,
-  transparent: true, opacity: 0.5
+  color: 0xddeeff, roughness: 0.02, metalness: 0.3,
+  transparent: true, opacity: 0.6,
+  emissive: 0x445566, emissiveIntensity: 0.15
 });
 const rim = new THREE.Mesh(rimGeo, rimMat);
 rim.rotation.x = Math.PI / 2;
 rim.position.y = BOWL_OPENING_Y;
 scene.add(rim);
+
+// Inner highlight ring — subtle glow just inside the rim
+const innerRimGeo = new THREE.TorusGeometry(BOWL_OPENING_R - 0.05, 0.03, 8, 64);
+const innerRimMat = new THREE.MeshBasicMaterial({
+  color: 0xaaccff, transparent: true, opacity: 0.2
+});
+const innerRim = new THREE.Mesh(innerRimGeo, innerRimMat);
+innerRim.rotation.x = Math.PI / 2;
+innerRim.position.y = BOWL_OPENING_Y - 0.02;
+scene.add(innerRim);
 
 // Caustic light pool on surface under bowl
 const poolGeo = new THREE.RingGeometry(BOWL_RADIUS - 0.3, BOWL_RADIUS + 1.5, 64, 2);
@@ -432,6 +443,13 @@ const waterMat = new THREE.ShaderMaterial({
       // Highlight from surface tension
       float tension = smoothstep(0.95, 1.0, d) * 0.15;
       waterColor += tension * vec3(0.8, 0.9, 1.0);
+
+      // Subtle foam patches near the edges
+      float foamNoise = sin(vWorldPos.x * 12.0 + uTime * 0.3) * cos(vWorldPos.z * 10.0 - uTime * 0.2);
+      foamNoise += sin(vWorldPos.x * 7.0 - vWorldPos.z * 9.0 + uTime * 0.5) * 0.5;
+      float foam = smoothstep(0.75, 0.92, d) * max(0.0, foamNoise) * 0.12;
+      waterColor += foam * vec3(0.9, 0.95, 1.0);
+      alpha += foam * 0.3;
 
       gl_FragColor = vec4(waterColor, alpha);
     }
@@ -1678,6 +1696,18 @@ class Fish {
     this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, this.eyeMat), { position: new THREE.Vector3(eyeX, eyeY, eyeZ) }));
     this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, this.eyeMat), { position: new THREE.Vector3(-eyeX, eyeY, eyeZ) }));
 
+    // Mouth — opens when near food
+    const mouthSize = species.size * 0.06;
+    const mouthGeo = new THREE.CircleGeometry(mouthSize, 8);
+    this.mouthMat = new THREE.MeshStandardMaterial({
+      color: 0x221111, roughness: 0.8, side: THREE.DoubleSide
+    });
+    this.mouthMesh = new THREE.Mesh(mouthGeo, this.mouthMat);
+    this.mouthMesh.position.set(0, -species.size * 0.03, -this.body.len * 0.48);
+    this.mouthMesh.scale.setScalar(0); // start closed
+    this.mesh.add(this.mouthMesh);
+    this.mouthOpen = 0; // 0=closed, 1=fully open
+
     this.mesh.position.copy(pos);
     scene.add(this.mesh);
   }
@@ -1804,6 +1834,16 @@ class Fish {
     const pFlutter = Math.sin(time * 6 + this.swimPhase) * 0.15;
     this.leftFin.rotation.z = -0.3 + pFlutter;
     this.rightFin.rotation.z = 0.3 - pFlutter;
+
+    // Mouth opens when near food
+    let nearFood = false;
+    for (let fi = 0; fi < foodParticles.length; fi++) {
+      if (this.pos.distanceTo(foodParticles[fi].pos) < 1.5) { nearFood = true; break; }
+    }
+    const mouthTarget = nearFood ? 1.0 : 0.0;
+    this.mouthOpen += (mouthTarget - this.mouthOpen) * Math.min(1, dt * 8);
+    const mScale = this.mouthOpen * 0.8;
+    this.mouthMesh.scale.set(mScale, mScale * (0.6 + Math.sin(time * 8) * 0.2), 1);
   }
 
   destroy() {
