@@ -1390,6 +1390,9 @@ class Fish {
     this.growthScale = 0.4; // start as baby, grow to 1.0
     this.bankAngle = 0; // body roll when turning
     this.prevVelX = 0; // for turn detection
+    this.trickTimer = 0; // countdown for special behavior
+    this.trickType = null; // 'spin', 'jump'
+    this.trickProgress = 0;
 
     // Fish personality — individual behavior variation
     this.personality = {
@@ -1593,7 +1596,8 @@ class Fish {
   update(dt, time) {
     this.vel.add(this.acc);
     const spd = this.vel.length();
-    const maxSpd = this.species.maxSpeed * this.personality.energy;
+    const frenzyBoost = feedingFrenzy > 0 ? 1.3 : 1.0;
+    const maxSpd = this.species.maxSpeed * this.personality.energy * frenzyBoost;
     const minSpd = this.species.speed * 0.3 * this.personality.energy;
     if (spd > maxSpd) this.vel.multiplyScalar(maxSpd / spd);
     if (spd < minSpd) this.vel.normalize().multiplyScalar(minSpd);
@@ -1640,6 +1644,35 @@ class Fish {
     this.bankAngle += (targetBank - this.bankAngle) * Math.min(1, dt * 4);
     // Apply bank as local Z rotation on body mesh
     this.bodyMesh.rotation.z = this.bankAngle;
+
+    // Random tricks (very occasional)
+    if (!this.trickType && !this.dying && this.growthScale >= 0.8) {
+      this.trickTimer -= dt;
+      if (this.trickTimer <= 0) {
+        this.trickTimer = 30 + Math.random() * 60; // 30-90 seconds between tricks
+        // Small chance to do a trick
+        if (Math.random() < 0.3) {
+          this.trickType = Math.random() < 0.7 ? 'spin' : 'jump';
+          this.trickProgress = 0;
+        }
+      }
+    }
+    if (this.trickType === 'spin') {
+      this.trickProgress += dt * 4;
+      this.bodyMesh.rotation.z += Math.sin(this.trickProgress * Math.PI) * Math.PI * 2 * dt * 3;
+      if (this.trickProgress >= 1) this.trickType = null;
+    }
+    if (this.trickType === 'jump' && this.pos.y > WATER_Y - 1.5) {
+      this.trickProgress += dt * 2;
+      const jumpPhase = Math.sin(this.trickProgress * Math.PI);
+      this.pos.y += jumpPhase * dt * 3;
+      if (this.trickProgress >= 1) {
+        this.trickType = null;
+        createSplashRipple(this.pos.x, this.pos.z);
+      }
+    } else if (this.trickType === 'jump') {
+      this.trickType = null; // Too deep to jump
+    }
 
     // Body undulation (sine wave along spine, stronger at tail)
     const bd = this.body;
@@ -2051,8 +2084,12 @@ function updateSplashRipples(dt) {
   }
 }
 
+// Feeding frenzy — temporarily boost nearby fish excitement
+let feedingFrenzy = 0;
+
 function dropFood(worldPos) {
   const count = 3 + Math.floor(Math.random() * 3);
+  feedingFrenzy = 3.0; // 3 seconds of excitement
   // Splash ripple at impact point
   createSplashRipple(worldPos.x, worldPos.z);
   if (Math.random() > 0.3) createSplashRipple(worldPos.x + (Math.random() - 0.5) * 0.3, worldPos.z + (Math.random() - 0.5) * 0.3);
@@ -2764,6 +2801,9 @@ function animate(now) {
 
   // Ecosystem tick
   updateEcosystem(dt);
+
+  // Feeding frenzy decay
+  if (feedingFrenzy > 0) feedingFrenzy = Math.max(0, feedingFrenzy - dt);
 
   // Food particles
   updateFood(dt);
