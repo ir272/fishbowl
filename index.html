@@ -574,6 +574,8 @@ createRock(0.3, 0.3, -2.0);
 // CORAL
 // ================================================================
 
+const coralPolyps = []; // track for animation
+
 function createCoral(x, z, color, height, branchCount) {
   const group = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55 });
@@ -598,16 +600,41 @@ function createCoral(x, z, color, height, branchCount) {
     branch.rotation.set(tilt * Math.cos(angle), 0, tilt * Math.sin(angle));
     group.add(branch);
 
-    // Tip bulb
+    // Animated polyp cluster at tip (replaces simple bulb)
+    const tipX = branch.position.x + Math.sin(angle) * bh * 0.3;
+    const tipY = startY + bh * 0.8;
+    const tipZ = branch.position.z + Math.cos(angle) * bh * 0.3;
+    const polypCount = 3 + Math.floor(rng() * 4);
+    const polypSeed = rng() * 100;
+    const tipColor = new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.3);
+
+    for (let p = 0; p < polypCount; p++) {
+      const pAngle = (p / polypCount) * Math.PI * 2;
+      const pLen = 0.06 + rng() * 0.04;
+      const pGeo = new THREE.CylinderGeometry(0.005, 0.012, pLen, 4);
+      const pMat = new THREE.MeshStandardMaterial({
+        color: tipColor, emissive: color, emissiveIntensity: 0.15, roughness: 0.4
+      });
+      const polyp = new THREE.Mesh(pGeo, pMat);
+      polyp.position.set(
+        tipX + Math.cos(pAngle) * 0.025,
+        tipY,
+        tipZ + Math.sin(pAngle) * 0.025
+      );
+      group.add(polyp);
+      coralPolyps.push({ mesh: polyp, seed: polypSeed + p * 1.7, baseAngle: pAngle, baseY: tipY });
+    }
+
+    // Central bulb (smaller, glowing)
+    const bulbMat = new THREE.MeshStandardMaterial({
+      color: tipColor, emissive: color, emissiveIntensity: 0.25, roughness: 0.3
+    });
     const bulb = new THREE.Mesh(
-      new THREE.SphereGeometry(0.04 + rng() * 0.04, 8, 8), mat
+      new THREE.SphereGeometry(0.025 + rng() * 0.015, 6, 6), bulbMat
     );
-    bulb.position.set(
-      branch.position.x + Math.sin(angle) * bh * 0.3,
-      startY + bh * 0.8,
-      branch.position.z + Math.cos(angle) * bh * 0.3
-    );
+    bulb.position.set(tipX, tipY, tipZ);
     group.add(bulb);
+    coralPolyps.push({ mesh: bulb, seed: polypSeed, baseAngle: 0, baseY: tipY, isBulb: true });
   }
 
   group.position.set(x, SAND_Y + 0.05, z);
@@ -2102,6 +2129,57 @@ function updateSplashRipples(dt) {
   }
 }
 
+// Sand disturbance particles — puffs of sand when fish swim near bottom
+const sandPuffs = [];
+const SAND_PUFF_THRESHOLD = SAND_Y + 0.6; // fish must be this close to sand
+
+function createSandPuff(x, z) {
+  const count = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i++) {
+    const geo = new THREE.SphereGeometry(0.03 + Math.random() * 0.03, 4, 4);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xc8b080, transparent: true, opacity: 0.6,
+      roughness: 1.0, emissive: 0x664422, emissiveIntensity: 0.15
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(
+      x + (Math.random() - 0.5) * 0.15,
+      SAND_Y + 0.05 + Math.random() * 0.05,
+      z + (Math.random() - 0.5) * 0.15
+    );
+    scene.add(mesh);
+    sandPuffs.push({
+      mesh, mat,
+      vel: new THREE.Vector3(
+        (Math.random() - 0.5) * 0.3,
+        0.15 + Math.random() * 0.25,
+        (Math.random() - 0.5) * 0.3
+      ),
+      life: 1.0 + Math.random() * 0.5,
+      maxLife: 1.0 + Math.random() * 0.5
+    });
+  }
+}
+
+function updateSandPuffs(dt) {
+  for (let i = sandPuffs.length - 1; i >= 0; i--) {
+    const p = sandPuffs[i];
+    p.life -= dt;
+    p.mesh.position.addScaledVector(p.vel, dt);
+    p.vel.y -= dt * 0.3; // gravity
+    p.vel.multiplyScalar(0.97); // drag
+    const t = 1 - p.life / p.maxLife;
+    p.mat.opacity = 0.6 * (1 - t * t);
+    p.mesh.scale.setScalar(1 + t * 1.5);
+    if (p.life <= 0) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      p.mat.dispose();
+      sandPuffs.splice(i, 1);
+    }
+  }
+}
+
 // Feeding frenzy — temporarily boost nearby fish excitement
 let feedingFrenzy = 0;
 
@@ -2673,6 +2751,56 @@ function initAudio() {
     setTimeout(playBubble, 2000 + Math.random() * 6000);
   }
   setTimeout(playBubble, 1000);
+
+  // Ambient procedural music — gentle pentatonic tones that shift with day/night
+  const pentatonic = [261.6, 293.7, 329.6, 392.0, 440.0, 523.3, 587.3, 659.3]; // C pentatonic
+  const nightNotes = [220.0, 246.9, 277.2, 329.6, 370.0, 440.0, 493.9, 554.4]; // darker minor
+  function playTone() {
+    const dayPhase = getDayPhase(performance.now() * 0.001);
+    const isNight = dayPhase >= 0.5;
+    const notes = isNight ? nightNotes : pentatonic;
+    const freq = notes[Math.floor(Math.random() * notes.length)];
+    const octaveShift = Math.random() < 0.3 ? 0.5 : (Math.random() < 0.2 ? 2 : 1);
+    const noteFreq = freq * octaveShift;
+    const duration = 1.5 + Math.random() * 3;
+    const now = audioCtx.currentTime;
+
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(noteFreq, now);
+
+    // Very gentle vibrato
+    const vibrato = audioCtx.createOscillator();
+    const vibratoGain = audioCtx.createGain();
+    vibrato.frequency.value = 3 + Math.random() * 2;
+    vibratoGain.gain.value = noteFreq * 0.003;
+    vibrato.connect(vibratoGain);
+    vibratoGain.connect(osc.frequency);
+    vibrato.start(now);
+    vibrato.stop(now + duration + 0.5);
+
+    const toneGain = audioCtx.createGain();
+    const vol = 0.015 + Math.random() * 0.015;
+    toneGain.gain.setValueAtTime(0, now);
+    toneGain.gain.linearRampToValueAtTime(vol, now + duration * 0.3);
+    toneGain.gain.linearRampToValueAtTime(vol * 0.7, now + duration * 0.7);
+    toneGain.gain.linearRampToValueAtTime(0.001, now + duration);
+
+    const toneFilter = audioCtx.createBiquadFilter();
+    toneFilter.type = 'lowpass';
+    toneFilter.frequency.value = isNight ? 600 : 900;
+    toneFilter.Q.value = 1;
+
+    osc.connect(toneFilter);
+    toneFilter.connect(toneGain);
+    toneGain.connect(master);
+    osc.start(now);
+    osc.stop(now + duration + 0.1);
+
+    // Schedule next tone with some overlap
+    setTimeout(playTone, (duration * 0.6 + Math.random() * 2) * 1000);
+  }
+  setTimeout(playTone, 3000);
 }
 
 // Start audio on first user interaction (browsers require user gesture)
@@ -2860,6 +2988,23 @@ function animate(now) {
   // Anemone tentacles
   anemones.forEach(a => { a.mat.uniforms.uTime.value = time; });
 
+  // Coral polyp animation — gentle pulsing and swaying
+  for (let i = 0; i < coralPolyps.length; i++) {
+    const cp = coralPolyps[i];
+    if (cp.isBulb) {
+      // Pulsing glow on central bulb
+      const pulse = 1.0 + Math.sin(time * 1.5 + cp.seed) * 0.15;
+      cp.mesh.scale.setScalar(pulse);
+    } else {
+      // Sway tentacle polyps
+      const sway = Math.sin(time * 2.0 + cp.seed) * 0.12;
+      const sway2 = Math.cos(time * 1.5 + cp.seed * 0.7) * 0.08;
+      cp.mesh.rotation.x = sway * Math.cos(cp.baseAngle);
+      cp.mesh.rotation.z = sway * Math.sin(cp.baseAngle) + sway2;
+      cp.mesh.position.y = cp.baseY + Math.sin(time * 1.8 + cp.seed) * 0.008;
+    }
+  }
+
   // Fish boids + update
   const eyeGlowAmount = nightFactor * 0.3;
   for (let i = 0; i < fishList.length; i++) {
@@ -2875,7 +3020,14 @@ function animate(now) {
         fishList[i].eyeMat.emissive.setHex(glowColor);
       }
     }
+    // Sand disturbance — kick up sand puffs when swimming near bottom
+    if (fishList[i].pos.y < SAND_PUFF_THRESHOLD && fishList[i].vel.length() > 0.3 && Math.random() < 0.03) {
+      createSandPuff(fishList[i].pos.x, fishList[i].pos.z);
+    }
   }
+
+  // Sand puff particles
+  updateSandPuffs(dt);
 
   // Ecosystem tick
   updateEcosystem(dt);
