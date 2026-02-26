@@ -82,6 +82,7 @@ canvas{display:block}
       <span class="species-count" id="count-large">0</span>
     </div>
     <div class="hud-day" id="day-counter">Day 1</div>
+    <div class="hud-day" id="time-of-day" style="border:none;margin-top:4px;padding-top:0"></div>
     <button id="feed-btn">Drop Food</button>
   </div>
 </div>
@@ -690,7 +691,7 @@ scene.add(new THREE.Mesh(atmosGeo, atmosMat));
 
 const bgMat = new THREE.ShaderMaterial({
   side: THREE.BackSide, depthWrite: false,
-  uniforms: { uTime: { value: 0 } },
+  uniforms: { uTime: { value: 0 }, uDayPhase: { value: 0 } },
   vertexShader: `
     varying vec3 vPos;
     void main() {
@@ -716,18 +717,53 @@ const bgMat = new THREE.ShaderMaterial({
       return smoothstep(0.12, 0.0, d) * brightness * twinkle;
     }
 
+    uniform float uDayPhase;
+
     void main() {
       vec3 dir = normalize(vPos);
       float y = dir.y;
-      float s = sin(uTime * 0.03) * 0.01;
-      vec3 top = vec3(0.06 + s, 0.09, 0.16);
-      vec3 mid = vec3(0.03, 0.06 + s, 0.12);
-      vec3 bot = vec3(0.01, 0.02, 0.04);
+
+      // Day colors
+      vec3 dayTop = vec3(0.08, 0.12, 0.22);
+      vec3 dayMid = vec3(0.04, 0.07, 0.15);
+      vec3 dayBot = vec3(0.02, 0.03, 0.06);
+
+      // Night colors
+      vec3 nightTop = vec3(0.01, 0.015, 0.05);
+      vec3 nightMid = vec3(0.005, 0.01, 0.03);
+      vec3 nightBot = vec3(0.002, 0.005, 0.015);
+
+      // Dusk/dawn accent
+      vec3 dawnAccent = vec3(0.15, 0.06, 0.02);
+
+      float nightMix = 0.0;
+      float dawnMix = 0.0;
+      if (uDayPhase < 0.15) {
+        dawnMix = 1.0 - uDayPhase / 0.15;
+        nightMix = dawnMix * 0.5;
+      } else if (uDayPhase > 0.5 && uDayPhase < 0.65) {
+        dawnMix = (uDayPhase - 0.5) / 0.15;
+        nightMix = dawnMix * 0.5;
+      } else if (uDayPhase >= 0.65) {
+        nightMix = 1.0;
+      }
+
+      vec3 top = mix(dayTop, nightTop, nightMix);
+      vec3 mid = mix(dayMid, nightMid, nightMix);
+      vec3 bot = mix(dayBot, nightBot, nightMix);
+
       vec3 c = mix(bot, mid, smoothstep(-0.5, 0.0, y));
       c = mix(c, top, smoothstep(0.0, 0.5, y));
-      // Bokeh dots
+
+      // Dawn/dusk warm glow on horizon
+      float horizonGlow = exp(-abs(y) * 4.0) * dawnMix * 0.3;
+      c += dawnAccent * horizonGlow;
+
+      // Bokeh dots (brighter at night)
+      float bokehStrength = 0.5 + nightMix * 1.5;
       float b = bokeh(dir, 0.0) + bokeh(dir, 3.7) * 0.6;
-      c += b * vec3(0.15, 0.2, 0.35) * smoothstep(-0.2, 0.3, y);
+      c += b * vec3(0.15, 0.2, 0.35) * smoothstep(-0.2, 0.3, y) * bokehStrength;
+
       gl_FragColor = vec4(c, 1.0);
     }
   `
@@ -1407,14 +1443,30 @@ let hudTimer = 0;
 let dayCount = 0;
 let dayAccum = 0;
 
-function updateHUD(dt) {
+const hudTimeOfDay = document.getElementById('time-of-day');
+
+function getTimeOfDayLabel(phase) {
+  if (phase < 0.08) return 'Dawn';
+  if (phase < 0.15) return 'Sunrise';
+  if (phase < 0.3) return 'Morning';
+  if (phase < 0.45) return 'Midday';
+  if (phase < 0.5) return 'Afternoon';
+  if (phase < 0.58) return 'Sunset';
+  if (phase < 0.65) return 'Dusk';
+  if (phase < 0.82) return 'Night';
+  return 'Late Night';
+}
+
+function updateHUD(dt, time) {
   hudTimer += dt;
-  if (hudTimer < 0.5) return; // update 2x per second
+  if (hudTimer < 0.5) return;
   hudTimer = 0;
   const c = countSpecies();
   hudSmall.textContent = c.small;
   hudMedium.textContent = c.medium;
   hudLarge.textContent = c.large;
+  const phase = getDayPhase(time);
+  hudTimeOfDay.textContent = getTimeOfDayLabel(phase);
 }
 
 function updateDay(dt) {
@@ -1445,6 +1497,68 @@ setTimeout(() => {
 }, 8000);
 
 // ================================================================
+// DAY/NIGHT CYCLE
+// ================================================================
+
+// One full cycle = 4 minutes (dawn -> day -> dusk -> night -> dawn)
+const DAY_CYCLE_DURATION = 240; // seconds
+
+function getDayPhase(time) {
+  const t = (time % DAY_CYCLE_DURATION) / DAY_CYCLE_DURATION; // 0-1
+  // 0-0.15 dawn, 0.15-0.5 day, 0.5-0.65 dusk, 0.65-1.0 night
+  return t;
+}
+
+function getDayLighting(phase) {
+  let sunIntensity, sunColor, ambientIntensity, ambientColor, exposure;
+
+  if (phase < 0.15) {
+    // Dawn: warm orange sunrise
+    const t = phase / 0.15;
+    sunIntensity = 0.3 + t * 0.7;
+    sunColor = new THREE.Color().lerpColors(
+      new THREE.Color(0.4, 0.2, 0.1), new THREE.Color(1.0, 0.85, 0.7), t
+    );
+    ambientIntensity = 0.2 + t * 0.3;
+    ambientColor = new THREE.Color().lerpColors(
+      new THREE.Color(0.15, 0.1, 0.2), new THREE.Color(0.2, 0.25, 0.35), t
+    );
+    exposure = 0.8 + t * 0.5;
+  } else if (phase < 0.5) {
+    // Day: bright, slightly warm
+    const t = (phase - 0.15) / 0.35;
+    sunIntensity = 1.0;
+    sunColor = new THREE.Color(1.0, 0.93, 0.85);
+    ambientIntensity = 0.5;
+    ambientColor = new THREE.Color(0.2, 0.27, 0.4);
+    exposure = 1.3 - Math.sin(t * Math.PI) * 0.1; // slight noon peak
+  } else if (phase < 0.65) {
+    // Dusk: golden/purple
+    const t = (phase - 0.5) / 0.15;
+    sunIntensity = 1.0 - t * 0.7;
+    sunColor = new THREE.Color().lerpColors(
+      new THREE.Color(1.0, 0.85, 0.6), new THREE.Color(0.6, 0.2, 0.15), t
+    );
+    ambientIntensity = 0.5 - t * 0.3;
+    ambientColor = new THREE.Color().lerpColors(
+      new THREE.Color(0.25, 0.2, 0.3), new THREE.Color(0.1, 0.05, 0.15), t
+    );
+    exposure = 1.3 - t * 0.6;
+  } else {
+    // Night: deep blue, moonlit
+    const t = (phase - 0.65) / 0.35;
+    const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI); // peaks mid-night
+    sunIntensity = 0.15 + pulse * 0.1;
+    sunColor = new THREE.Color(0.3, 0.35, 0.6);
+    ambientIntensity = 0.15 + pulse * 0.05;
+    ambientColor = new THREE.Color(0.05, 0.08, 0.2);
+    exposure = 0.6 + pulse * 0.15;
+  }
+
+  return { sunIntensity, sunColor, ambientIntensity, ambientColor, exposure };
+}
+
+// ================================================================
 // RENDER LOOP
 // ================================================================
 
@@ -1456,6 +1570,17 @@ function animate(now) {
   const dt = Math.min(time - lastTime, 0.05);
   lastTime = time;
   if (dt <= 0) return;
+
+  // Day/night cycle
+  const dayPhase = getDayPhase(time);
+  const dayLight = getDayLighting(dayPhase);
+  sunLight.intensity = dayLight.sunIntensity;
+  sunLight.color.copy(dayLight.sunColor);
+  scene.children[0].intensity = dayLight.ambientIntensity; // ambient light
+  scene.children[0].color.copy(dayLight.ambientColor);
+  renderer.toneMappingExposure = dayLight.exposure;
+  // Underwater glow responds to day cycle
+  underwaterGlow.intensity = 0.2 + dayLight.sunIntensity * 0.3;
 
   // Auto-rotate when not dragging
   if (!dragging) camTheta += 0.04 * dt;
@@ -1477,8 +1602,9 @@ function animate(now) {
   // God rays
   for (const grMat of godRays) grMat.uniforms.uTime.value = time;
 
-  // Background color shift
+  // Background color shift + day phase
   bgMat.uniforms.uTime.value = time;
+  bgMat.uniforms.uDayPhase.value = dayPhase;
 
   // Particle drift
   const pp = particleGeo.attributes.position;
@@ -1528,7 +1654,7 @@ function animate(now) {
   if (!dragging) updateMouseScatter();
 
   // HUD
-  updateHUD(dt);
+  updateHUD(dt, time);
   updateDay(dt);
 
   renderer.render(scene, camera);
