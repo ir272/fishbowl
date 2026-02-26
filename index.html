@@ -384,9 +384,51 @@ scene.add(bgSphere);
 const BOWL_INNER = BOWL_RADIUS - 0.6; // swim boundary
 const fishList = [];
 
+// --- Fish body geometry builder ---
+function buildFishBody(key, size) {
+  const SEGS = 12, RING = 8;
+  const len = size * 2.5;
+  const hs = key === 'medium' ? 1.4 : 1.0; // angelfish are taller
+  const pos = [], idx = [];
+
+  for (let s = 0; s <= SEGS; s++) {
+    const t = s / SEGS; // 0=tail, 1=head
+    const z = (0.5 - t) * len; // tail at +z, head at -z (faces -z for lookAt)
+    let base = Math.sin(t * Math.PI);
+    if (t < 0.12) base *= t / 0.12;
+    const rScale = key === 'small' ? 0.35 : key === 'medium' ? 0.28 : 0.42;
+    const r = base * rScale * size;
+
+    for (let j = 0; j <= RING; j++) {
+      const a = (j / RING) * Math.PI * 2;
+      pos.push(Math.cos(a) * r, Math.sin(a) * r * hs, z);
+    }
+  }
+
+  for (let s = 0; s < SEGS; s++) {
+    for (let j = 0; j < RING; j++) {
+      const a = s * (RING + 1) + j;
+      idx.push(a, a + RING + 1, a + 1, a + 1, a + RING + 1, a + RING + 2);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return { geo, rest: new Float32Array(pos), len, SEGS, RING };
+}
+
+// Reusable objects for smooth rotation
+const _lookTarget = new THREE.Vector3();
+const _lookMat = new THREE.Matrix4();
+const _targetQuat = new THREE.Quaternion();
+const _up = new THREE.Vector3(0, 1, 0);
+
 class Fish {
-  constructor(species, pos) {
+  constructor(species, speciesKey, pos) {
     this.species = species;
+    this.speciesKey = speciesKey;
     this.pos = pos.clone();
     this.vel = new THREE.Vector3(
       (rng() - 0.5) * 2, (rng() - 0.5) * 0.5, (rng() - 0.5) * 2
@@ -394,23 +436,89 @@ class Fish {
     this.acc = new THREE.Vector3();
     this.age = 0;
     this.alive = true;
+    this.swimPhase = rng() * Math.PI * 2;
+    this.opacity = 1;
 
-    // Simple mesh placeholder (will be replaced with proper geometry in M3)
-    const geo = new THREE.SphereGeometry(species.size * 0.5, 8, 6);
-    geo.scale(1.8, 0.8, 1); // elongate for fish shape
+    const color = species.colors[Math.floor(rng() * species.colors.length)];
     this.mat = new THREE.MeshStandardMaterial({
-      color: species.colors[Math.floor(rng() * species.colors.length)],
-      roughness: 0.4, metalness: 0.1
+      color, roughness: 0.3, metalness: 0.15, side: THREE.DoubleSide
     });
-    this.mesh = new THREE.Mesh(geo, this.mat);
+
+    this.mesh = new THREE.Group();
+
+    // Body
+    this.body = buildFishBody(speciesKey, species.size);
+    this.bodyMesh = new THREE.Mesh(this.body.geo, this.mat);
+    this.mesh.add(this.bodyMesh);
+
+    // Tail fin
+    const tMul = speciesKey === 'large' ? 1.4 : speciesKey === 'medium' ? 0.8 : 0.5;
+    const tailGeo = new THREE.PlaneGeometry(
+      species.size * tMul * 0.7,
+      species.size * tMul * 1.1,
+      1, 4
+    );
+    // V-notch: indent center of trailing edge
+    const tv = tailGeo.attributes.position;
+    for (let i = 0; i < tv.count; i++) {
+      const y = tv.getY(i);
+      const x = tv.getX(i);
+      const indentFactor = 1 - Math.abs(y) / (species.size * tMul * 0.55);
+      if (x > 0) tv.setX(i, x - indentFactor * species.size * tMul * 0.15);
+    }
+    tailGeo.computeVertexNormals();
+    this.tailMesh = new THREE.Mesh(tailGeo, this.mat);
+    this.tailMesh.rotation.y = Math.PI / 2;
+    this.tailMesh.position.z = this.body.len * 0.46;
+    this.mesh.add(this.tailMesh);
+
+    // Dorsal fin
+    const dh = speciesKey === 'large' ? 0.5 : speciesKey === 'medium' ? 0.5 : 0.22;
+    const dorsalGeo = new THREE.PlaneGeometry(this.body.len * 0.3, species.size * dh, 4, 1);
+    // Taper dorsal fin toward tail
+    const dv = dorsalGeo.attributes.position;
+    for (let i = 0; i < dv.count; i++) {
+      const x = dv.getX(i);
+      if (x > 0) dv.setY(i, dv.getY(i) * (1 - x / (this.body.len * 0.15) * 0.4));
+    }
+    dorsalGeo.computeVertexNormals();
+    this.dorsalMesh = new THREE.Mesh(dorsalGeo, this.mat);
+    this.dorsalMesh.rotation.y = Math.PI / 2;
+    const bodyR = species.size * (speciesKey === 'small' ? 0.35 : speciesKey === 'medium' ? 0.28 : 0.42);
+    const hsFin = speciesKey === 'medium' ? 1.4 : 1.0;
+    this.dorsalMesh.position.set(0, bodyR * hsFin + species.size * dh * 0.3, -this.body.len * 0.05);
+    this.mesh.add(this.dorsalMesh);
+
+    // Pectoral fins (small side fins)
+    const pSize = species.size * 0.25;
+    const pGeo = new THREE.PlaneGeometry(pSize, pSize * 1.5);
+    this.leftFin = new THREE.Mesh(pGeo, this.mat);
+    this.leftFin.position.set(bodyR * 0.9, -species.size * 0.05, -this.body.len * 0.15);
+    this.leftFin.rotation.set(0.2, 0.4, -0.3);
+    this.mesh.add(this.leftFin);
+
+    this.rightFin = new THREE.Mesh(pGeo, this.mat);
+    this.rightFin.position.set(-bodyR * 0.9, -species.size * 0.05, -this.body.len * 0.15);
+    this.rightFin.rotation.set(0.2, -0.4, 0.3);
+    this.mesh.add(this.rightFin);
+
+    // Eyes
+    const eyeGeo = new THREE.SphereGeometry(species.size * 0.06, 6, 6);
+    const eyeMat = new THREE.MeshStandardMaterial({ color: 0x111122, roughness: 0.1, metalness: 0.5 });
+    const eyeZ = -this.body.len * 0.4;
+    const eyeX = species.size * 0.14;
+    const eyeY = species.size * 0.06;
+    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, eyeMat), { position: new THREE.Vector3(eyeX, eyeY, eyeZ) }));
+    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, eyeMat), { position: new THREE.Vector3(-eyeX, eyeY, eyeZ) }));
+
+    this.mesh.position.copy(pos);
     scene.add(this.mesh);
   }
 
   applyForce(f) { this.acc.add(f); }
 
-  update(dt) {
+  update(dt, time) {
     this.vel.add(this.acc);
-    // Clamp speed
     const spd = this.vel.length();
     if (spd > this.species.maxSpeed) this.vel.multiplyScalar(this.species.maxSpeed / spd);
     if (spd < this.species.speed * 0.3) this.vel.normalize().multiplyScalar(this.species.speed * 0.3);
@@ -419,20 +527,51 @@ class Fish {
     this.acc.set(0, 0, 0);
     this.age += dt;
 
-    // Update mesh
     this.mesh.position.copy(this.pos);
-    // Point mesh in direction of movement
+
+    // Smooth rotation toward velocity
     if (spd > 0.01) {
-      const target = this.pos.clone().add(this.vel);
-      this.mesh.lookAt(target);
+      _lookTarget.copy(this.pos).add(this.vel);
+      _lookMat.lookAt(this.pos, _lookTarget, _up);
+      _targetQuat.setFromRotationMatrix(_lookMat);
+      this.mesh.quaternion.slerp(_targetQuat, Math.min(1, dt * 6));
     }
+
+    // Body undulation (sine wave along spine, stronger at tail)
+    const bd = this.body;
+    const positions = bd.geo.attributes.position;
+    const swimFreq = 4 + spd * 2;
+    const phase = this.swimPhase + time * swimFreq;
+
+    for (let s = 0; s <= bd.SEGS; s++) {
+      const t = s / bd.SEGS; // 0=tail, 1=head
+      const amp = (1 - t) * this.species.size * 0.12;
+      const wave = Math.sin(t * 7 - phase) * amp;
+      for (let j = 0; j <= bd.RING; j++) {
+        const idx = (s * (bd.RING + 1) + j) * 3;
+        positions.array[idx] = bd.rest[idx] + wave;
+      }
+    }
+    positions.needsUpdate = true;
+    bd.geo.computeVertexNormals();
+
+    // Tail wag synchronized with body wave
+    this.tailMesh.rotation.z = Math.sin(phase) * 0.35;
+
+    // Dorsal fin flutter
+    this.dorsalMesh.rotation.z = Math.sin(time * 3 + this.swimPhase) * 0.04;
+
+    // Pectoral fin flutter
+    const pFlutter = Math.sin(time * 6 + this.swimPhase) * 0.15;
+    this.leftFin.rotation.z = -0.3 + pFlutter;
+    this.rightFin.rotation.z = 0.3 - pFlutter;
   }
 
   destroy() {
     this.alive = false;
     scene.remove(this.mesh);
-    if (this.mesh.geometry) this.mesh.geometry.dispose();
-    if (this.mat) this.mat.dispose();
+    this.body.geo.dispose();
+    this.mat.dispose();
   }
 }
 
@@ -573,7 +712,7 @@ function spawnFish(speciesKey, count) {
     const r = 1 + rng() * 2;
     const y = SAND_Y + 1.5 + rng() * (WATER_Y - SAND_Y - 3);
     const pos = new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r);
-    fishList.push(new Fish(sp, pos));
+    fishList.push(new Fish(sp, speciesKey, pos));
   }
 }
 
@@ -674,7 +813,7 @@ function animate(now) {
   for (let i = 0; i < fishList.length; i++) {
     if (!fishList[i].alive) continue;
     boids(fishList[i], fishList, dt);
-    fishList[i].update(dt);
+    fishList[i].update(dt, time);
   }
 
   renderer.render(scene, camera);
