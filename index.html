@@ -180,7 +180,7 @@ canvas{display:block}
 <div id="follow-label"></div>
 <div id="underwater-indicator">Dive Mode</div>
 <div id="screenshot-flash"></div>
-<div id="keyboard-help">Space — Pause&ensp;|&ensp;F — Feed&ensp;|&ensp;+/- — Speed<br>R — Reset view&ensp;|&ensp;H — This help&ensp;|&ensp;Click fish — Follow<br>U — Dive mode&ensp;|&ensp;S — Screenshot&ensp;|&ensp;Esc — Exit</div>
+<div id="keyboard-help">Space — Pause&ensp;|&ensp;F — Feed&ensp;|&ensp;+/- — Speed&ensp;|&ensp;T — Time-lapse<br>U — Dive mode&ensp;|&ensp;S — Screenshot&ensp;|&ensp;R — Reset&ensp;|&ensp;Esc — Exit<br>Click fish — Follow&ensp;|&ensp;Double-click — Zoom&ensp;|&ensp;H — Toggle help</div>
 <div class="vignette"></div>
 <div class="hint">
   Click to feed<br>
@@ -491,21 +491,43 @@ const sandMat = new THREE.ShaderMaterial({
     varying vec3 vWorldPos;
     varying vec3 vNormal;
 
-    float caustic(vec2 p, float t) {
-      float c = 0.0;
-      for (int i = 1; i <= 4; i++) {
-        float fi = float(i);
-        vec2 q = p * fi * 1.8 + t * vec2(0.25 * fi, 0.18 * fi);
-        c += abs(sin(q.x + sin(q.y * 1.3 + t * 0.4))
-               * sin(q.y + sin(q.x * 0.7 + t * 0.3)));
+    // Pseudo-random for Voronoi
+    vec2 hash22(vec2 p) {
+      p = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
+      return fract(sin(p) * 43758.5453);
+    }
+
+    // Voronoi-based caustic pattern
+    float voronoiCaustic(vec2 p, float t) {
+      vec2 ip = floor(p);
+      vec2 fp = fract(p);
+      float d1 = 8.0, d2 = 8.0;
+      for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+          vec2 neighbor = vec2(float(x), float(y));
+          vec2 point = hash22(ip + neighbor);
+          // Animate the points
+          point = 0.5 + 0.5 * sin(t * 0.4 + 6.28 * point);
+          float dist = length(neighbor + point - fp);
+          if (dist < d1) { d2 = d1; d1 = dist; }
+          else if (dist < d2) { d2 = dist; }
+        }
       }
-      return pow(c * 0.25, 2.0);
+      // Edge detection between cells creates caustic lines
+      return pow(d2 - d1, 0.8);
+    }
+
+    float caustic(vec2 p, float t) {
+      // Layer two Voronoi patterns at different scales
+      float c1 = voronoiCaustic(p * 1.5, t);
+      float c2 = voronoiCaustic(p * 3.0 + 5.0, t * 1.3);
+      return (c1 * 0.6 + c2 * 0.4) * 1.2;
     }
 
     void main() {
       vec3 sand = texture2D(uSandTex, vUv).rgb;
       float caust = caustic(vWorldPos.xz * 0.6, uTime * 0.35);
-      vec3 causticColor = vec3(0.35, 0.55, 0.85) * caust * 2.0;
+      vec3 causticColor = vec3(0.35, 0.55, 0.85) * caust * 1.8;
       vec3 lightDir = normalize(vec3(3.0, 10.0, 5.0));
       float diff = max(dot(vNormal, lightDir), 0.0) * 0.5 + 0.5;
       vec3 color = sand * diff + causticColor;
@@ -2333,13 +2355,19 @@ document.addEventListener('keydown', e => {
     const r = Math.random() * 1.5;
     dropFood(new THREE.Vector3(Math.cos(angle) * r, WATER_Y, Math.sin(angle) * r));
   }
-  if (key === '=' || key === '+') { simSpeed = Math.min(3, simSpeed + 0.5); updateSpeedHUD(); }
+  if (key === '=' || key === '+') { simSpeed = Math.min(8, simSpeed + 0.5); updateSpeedHUD(); }
   if (key === '-') { simSpeed = Math.max(0.25, simSpeed - 0.25); updateSpeedHUD(); }
   if (key === 'r') { camRadius = 13; camRadiusTarget = 13; camPhi = 1.05; camTheta = 0; stopFollowing(); underwaterMode = false; underwaterIndicator.style.display = 'none'; }
   if (key === 'escape') { stopFollowing(); if (underwaterMode) { underwaterMode = false; underwaterIndicator.style.display = 'none'; camRadiusTarget = 13; } }
   if (key === 'h') { helpVisible = !helpVisible; keyboardHelp.style.opacity = helpVisible ? '1' : '0'; }
   if (key === 'u') toggleUnderwaterMode();
   if (key === 's') takeScreenshot();
+  if (key === 't') {
+    // Time-lapse toggle: 1x <-> 8x
+    if (simSpeed < 5) { simSpeed = 8; showEvent('Time-lapse mode: 8x'); }
+    else { simSpeed = 1; showEvent('Normal speed'); }
+    updateSpeedHUD();
+  }
 });
 
 const simSpeedEl = document.getElementById('sim-speed');
