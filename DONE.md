@@ -2,58 +2,124 @@
 
 ## What Was Built
 
-A real-time 3D aquarium ecosystem simulation running entirely in the browser as a single HTML file. The experience features a glass fishbowl with three species of fish governed by Craig Reynolds' Boids flocking algorithm, a self-balancing ecosystem with predator-prey dynamics, and multiple layers of visual effects.
+A real-time 3D aquarium ecosystem simulation running entirely in the browser as a single HTML file (~2800 lines). The experience features a glass fishbowl with three species of fish governed by Craig Reynolds' Boids flocking algorithm, a self-balancing ecosystem with predator-prey dynamics, a full day/night cycle, ambient underwater audio, and over 15 custom GLSL shaders.
 
 ## What Works
 
 **Core Rendering**
-- Glass fishbowl with fresnel transparency, chromatic edge tinting, and dual specular highlights
-- Sandy floor with real-time procedural caustic light patterns (4-layer sine wave network)
-- 4 volumetric god ray light shafts with pulsing animation
-- Animated water surface with multi-frequency wave displacement and ripple patterns
-- 250 floating plankton particles with additive blending
+- Glass fishbowl with fresnel transparency, animated sparkle glints, chromatic edge tinting, and dual specular highlights
+- Sandy floor with Voronoi-based animated caustic light patterns (realistic underwater light network)
+- Caustic light pool projected under the bowl onto the surface
+- 4 volumetric god ray light shafts that dim/brighten with day/night cycle
+- Animated water surface with multi-layer ripples, fresnel effect, meniscus, and surface tension highlights
+- 250 floating plankton particles with bioluminescent night glow
+- 35 rising bubble particles with wobble animation
+- Air stone with focused bubble stream and green tube
 - Underwater atmosphere depth fog
-- Slowly shifting background gradient
-- Procedural rocks, branching coral, and swaying seaweed
+- Vignette overlay
+- Background with bokeh dots, twinkling stars at night, and moon glow
+
+**Decorations**
+- Procedural rocks (6), branching coral (4), shader-animated seaweed (7)
+- Sea anemones (3) with shader-animated waving tentacles and bright tips
+- Decorative shells (4), scattered pebbles (15), starfish (2)
+- Treasure chest with gold coins
+- Scuba diver figurine with mask, tank, flippers
 
 **Fish System**
 - 3 species: Neon Tetra (blue schooling), Angelfish (gold mid-tier), Betta (purple predator)
-- Each fish built from procedural BufferGeometry with real-time spine undulation
-- Animated tail fin, dorsal fin, and pectoral fins
+- Each fish built from procedural BufferGeometry with 16 spine segments, 10 ring segments
+- Species-specific body profiles (torpedo, diamond, robust)
+- Iridescent ShaderMaterial with view-angle hue shift, scale patterns, rim lighting
+- Depth-based blue tinting and caustic light dappling on bodies
+- Real-time spine undulation for swimming animation
+- Animated tail fin, dorsal fin, pectoral fins
+- Betta: extra-large flowing tail, flowing dorsal crown, ventral belly fin
+- Body banking on turns for realistic movement
+- Growth system: babies start at 40% scale and grow
 - Smooth quaternion slerp rotation toward movement direction
-- Full Boids: separation, alignment, cohesion, wall avoidance, vertical bounds
+- Individual personality system: boldness, sociability, curiosity, energy
+
+**Boids Algorithm**
+- Separation, alignment, cohesion (modulated by personality)
+- Wall avoidance (quadratic force near bowl boundary)
+- Vertical bounds (stay below water, above sand)
+- Predator avoidance (modulated by boldness personality)
+- Prey hunting behavior
+- Food attraction (modulated by curiosity personality)
+- Mouse scatter (flee from mouse near glass)
+- Speed modulated by energy personality
 
 **Ecosystem**
 - Food chain: large eats medium+small, medium eats small
-- Predator avoidance and prey hunting behavior integrated into boids
 - Reproduction: mature fish produce offspring that fade in
 - Lifespan: old fish fade out and sink
 - Population protection: minimum species counts enforced, respawn if needed
+- Endangered species warnings
+- Auto-feed every 45 seconds
+- Event notifications for all ecosystem events
 - Runs self-balancing for extended periods
+
+**Day/Night Cycle**
+- 4-minute full cycle: dawn (warm orange) → day (bright) → dusk (golden/purple) → night (deep blue)
+- Dynamic sun color, intensity, ambient light, and exposure
+- Background responds to phase with horizon glow at dawn/dusk
+- Twinkling star field and moon glow during night
+- Bioluminescent plankton at night
+- God rays dim with sun intensity
+
+**Audio**
+- Procedural ambient underwater audio via Web Audio API
+- Deep rumble (low-pass filtered noise)
+- Mid-range water ambiance (bandpass filtered noise)
+- Periodic bubble pop sounds
+- Starts on first user interaction
 
 **Interaction**
 - Click/tap to drop food particles (3-5 per click, drift down, attract fish)
+- Water splash ripple rings on food drop
+- Click on fish to follow with camera (orbit around followed fish)
+- Double-click to toggle zoom
 - Mouse hover near glass scatters nearby fish
-- Drag to orbit, scroll to zoom
+- Drag to orbit, scroll to zoom (smooth lerp)
 - Feed button for mobile
 - Touch support for all interactions
 
+**Keyboard Controls**
+- Space/P — Pause/unpause
+- F — Drop food
+- +/- — Speed control (0.25x to 8x)
+- T — Time-lapse toggle (1x ↔ 8x)
+- U — Underwater dive mode (first-person inside bowl)
+- S — Screenshot (saves PNG with flash effect)
+- R — Reset camera view
+- H — Toggle keyboard help overlay
+- Esc — Stop following / exit dive mode
+
 **HUD**
 - Frosted glass panel with population counts per species
+- Total population count
+- Ecosystem health indicator (Thriving/Balanced/Stressed/Critical)
 - Day counter (1 real minute = 1 day)
+- Time of day label (Dawn, Sunrise, Morning, Midday, etc.)
+- Simulation speed indicator
+- Animated event notification toasts
 - Animated hint overlay that fades after 8 seconds
+- FPS counter
+- Loading screen with spinner
 
 ## What I'd Improve With More Time
 
-- **Post-processing**: Screen-space refraction through the glass bowl using render targets (would make the glass truly distort what's behind it)
-- **Better fish geometry**: More detailed body profiles per species, flowing betta fins with cloth-sim-like vertex animation
-- **Instanced rendering**: Move fish to InstancedMesh with custom vertex shader attributes for better performance at higher fish counts
-- **Depth of field**: Fake bokeh blur for fish far from the focal plane using multi-pass rendering
-- **Sound design**: Ambient underwater audio, subtle bubble sounds
-- **Procedural plants**: Kelp with more segments and physics-based sway instead of simple rotation
-- **Day/night cycle**: Gradually shift lighting color temperature, dim lights at "night"
-- **Fish personality**: Give individual fish slightly different behavior weights (some braver, some more shy)
-- **Bubble particles**: Rising bubbles from the sand/coral with refraction sprites
+- **Post-processing**: Screen-space refraction through the glass bowl using render targets
+- **Instanced rendering**: Move fish to InstancedMesh for better performance at higher counts
+- **Depth of field**: Fake bokeh blur for fish far from the focal plane
+- **Fish trails**: Subtle motion blur trail particles behind fast-swimming fish
+- **Cloth sim fins**: Betta fins with spring-mass vertex animation
+- **Procedural kelp**: Multi-segment physics-based kelp with better animation
+- **Biome zones**: Different areas of the bowl with temperature/light variation
+- **Fish AI states**: Resting, playing, territorial behavior
+- **Multiplayer**: Share bowls between friends via WebRTC
+- **Mobile optimization**: Touch gesture improvements, reduced particle counts
 
 ## How to View
 
