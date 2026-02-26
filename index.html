@@ -107,15 +107,28 @@ const glassMat = new THREE.ShaderMaterial({
     void main() {
       vec3 viewDir = normalize(cameraPosition - vWorldPos);
       vec3 n = gl_FrontFacing ? vNormal : -vNormal;
-      float fresnel = pow(1.0 - abs(dot(n, viewDir)), 3.0);
-      vec3 color = mix(vec3(0.7, 0.85, 0.95), vec3(0.95, 0.97, 1.0), fresnel);
+      float fresnel = pow(1.0 - abs(dot(n, viewDir)), 3.5);
 
+      // Chromatic edge tint
+      vec3 baseColor = vec3(0.7, 0.85, 0.95);
+      vec3 edgeColor = vec3(0.8, 0.9, 1.0);
+      vec3 rainbowEdge = vec3(0.85 + fresnel * 0.1, 0.9, 1.0 - fresnel * 0.05);
+      vec3 color = mix(baseColor, rainbowEdge, fresnel);
+
+      // Multiple specular highlights (main + rim)
       vec3 lightDir = normalize(vec3(3.0, 10.0, 5.0));
       vec3 h = normalize(lightDir + viewDir);
-      float spec = pow(max(dot(n, h), 0.0), 128.0);
-      color += spec * 0.6;
+      float spec = pow(max(dot(n, h), 0.0), 196.0) * 0.7;
+      vec3 lightDir2 = normalize(vec3(-2.0, 6.0, -3.0));
+      vec3 h2 = normalize(lightDir2 + viewDir);
+      float spec2 = pow(max(dot(n, h2), 0.0), 96.0) * 0.3;
+      color += (spec + spec2) * vec3(1.0, 0.98, 0.95);
 
-      float alpha = mix(0.04, 0.3, fresnel) + spec * 0.4;
+      // Glass rim glow
+      float rimGlow = pow(fresnel, 5.0) * 0.15;
+      color += rimGlow * vec3(0.6, 0.8, 1.0);
+
+      float alpha = mix(0.03, 0.28, fresnel) + (spec + spec2) * 0.4 + rimGlow;
       gl_FragColor = vec4(color, alpha);
     }
   `
@@ -149,20 +162,35 @@ const waterMat = new THREE.ShaderMaterial({
   vertexShader: `
     uniform float uTime;
     varying vec2 vUv;
+    varying vec3 vWorldPos;
     void main() {
       vUv = uv;
       vec3 pos = position;
-      pos.y += sin(pos.x * 2.0 + uTime * 0.8) * 0.04
-             + cos(pos.z * 2.5 + uTime * 0.6) * 0.03;
+      float t = uTime;
+      pos.y += sin(pos.x * 2.0 + t * 0.8) * 0.04
+             + cos(pos.z * 2.5 + t * 0.6) * 0.03
+             + sin(pos.x * 4.0 - pos.z * 3.0 + t * 1.2) * 0.015;
+      vWorldPos = (modelMatrix * vec4(pos, 1.0)).xyz;
       gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
     }
   `,
   fragmentShader: `
+    uniform float uTime;
     varying vec2 vUv;
+    varying vec3 vWorldPos;
     void main() {
       float d = length(vUv - 0.5) * 2.0;
-      float alpha = 0.12 * (1.0 - d * 0.3);
-      gl_FragColor = vec4(0.3, 0.55, 0.7, alpha);
+      // Ripple pattern on surface
+      float ripple = sin(vWorldPos.x * 5.0 + uTime * 0.7)
+                   * cos(vWorldPos.z * 4.0 + uTime * 0.5) * 0.3 + 0.7;
+      float alpha = 0.1 * (1.0 - d * 0.4) * ripple;
+      // Subtle color variation
+      vec3 waterColor = mix(vec3(0.2, 0.45, 0.65), vec3(0.35, 0.6, 0.75), ripple);
+      // Bright edge where water meets glass
+      float edge = smoothstep(0.85, 1.0, d);
+      waterColor += edge * vec3(0.2, 0.3, 0.4);
+      alpha += edge * 0.08;
+      gl_FragColor = vec4(waterColor, alpha);
     }
   `
 });
@@ -197,9 +225,52 @@ for (let i = 0; i < sp.count; i++) {
 }
 sandGeo.computeVertexNormals();
 
-const sand = new THREE.Mesh(sandGeo, new THREE.MeshStandardMaterial({
-  map: sandTexture, roughness: 0.95, metalness: 0
-}));
+const sandMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uSandTex: { value: sandTexture },
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    varying vec3 vWorldPos;
+    varying vec3 vNormal;
+    void main() {
+      vUv = uv;
+      vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+      vNormal = normalize(mat3(modelMatrix) * normal);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uSandTex;
+    uniform float uTime;
+    varying vec2 vUv;
+    varying vec3 vWorldPos;
+    varying vec3 vNormal;
+
+    float caustic(vec2 p, float t) {
+      float c = 0.0;
+      for (int i = 1; i <= 4; i++) {
+        float fi = float(i);
+        vec2 q = p * fi * 1.8 + t * vec2(0.25 * fi, 0.18 * fi);
+        c += abs(sin(q.x + sin(q.y * 1.3 + t * 0.4))
+               * sin(q.y + sin(q.x * 0.7 + t * 0.3)));
+      }
+      return pow(c * 0.25, 2.0);
+    }
+
+    void main() {
+      vec3 sand = texture2D(uSandTex, vUv).rgb;
+      float caust = caustic(vWorldPos.xz * 0.6, uTime * 0.35);
+      vec3 causticColor = vec3(0.35, 0.55, 0.85) * caust * 2.0;
+      vec3 lightDir = normalize(vec3(3.0, 10.0, 5.0));
+      float diff = max(dot(vNormal, lightDir), 0.0) * 0.5 + 0.5;
+      vec3 color = sand * diff + causticColor;
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `
+});
+const sand = new THREE.Mesh(sandGeo, sandMat);
 sand.position.y = SAND_Y;
 sand.receiveShadow = true;
 scene.add(sand);
@@ -343,6 +414,98 @@ const particles = new THREE.Points(particleGeo, new THREE.PointsMaterial({
   blending: THREE.AdditiveBlending, depthWrite: false
 }));
 scene.add(particles);
+
+// ================================================================
+// GOD RAYS (volumetric light shafts)
+// ================================================================
+
+const godRays = [];
+
+function createGodRay(x, z, width, angle) {
+  const height = WATER_Y - SAND_Y - 0.5;
+  const geo = new THREE.PlaneGeometry(width, height, 1, 12);
+  // Taper: wider at top, narrower at bottom
+  const gp = geo.attributes.position;
+  for (let i = 0; i < gp.count; i++) {
+    const y = gp.getY(i);
+    const t = (y + height / 2) / height; // 0=bottom, 1=top
+    gp.setX(i, gp.getX(i) * (0.2 + t * 0.8));
+  }
+  geo.computeVertexNormals();
+
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    uniforms: { uTime: { value: 0 }, uOffset: { value: Math.random() * 10 } },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uOffset;
+      varying vec2 vUv;
+      void main() {
+        float y = vUv.y;
+        float x = abs(vUv.x - 0.5) * 2.0;
+        float beam = y * (1.0 - x * x) * 0.07;
+        beam *= 0.5 + 0.5 * sin(uTime * 0.2 + uOffset + y * 2.0);
+        beam *= 0.7 + 0.3 * sin(uTime * 0.15 + uOffset * 2.0);
+        gl_FragColor = vec4(0.45, 0.65, 0.9, beam);
+      }
+    `
+  });
+
+  // Create crossed planes for volume effect
+  const group = new THREE.Group();
+  const plane1 = new THREE.Mesh(geo, mat);
+  group.add(plane1);
+  const plane2 = new THREE.Mesh(geo.clone(), mat);
+  plane2.rotation.y = Math.PI / 2;
+  group.add(plane2);
+
+  group.position.set(x, (WATER_Y + SAND_Y) / 2 + 0.3, z);
+  group.rotation.y = angle;
+  group.rotation.z = 0.05; // slight tilt
+  scene.add(group);
+  godRays.push(mat);
+  return group;
+}
+
+createGodRay(0.8, -0.5, 1.2, 0);
+createGodRay(-1.5, 1.0, 0.9, 0.5);
+createGodRay(1.2, 1.5, 0.7, -0.3);
+createGodRay(-0.5, -1.8, 1.0, 0.8);
+
+// ================================================================
+// UNDERWATER ATMOSPHERE (subtle fog volume)
+// ================================================================
+
+const atmosGeo = new THREE.SphereGeometry(BOWL_RADIUS - 0.5, 32, 32);
+const atmosMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.BackSide,
+  uniforms: {},
+  vertexShader: `
+    varying vec3 vWorldPos;
+    void main() {
+      vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vWorldPos;
+    void main() {
+      float depth = 1.0 - (vWorldPos.y + 5.0) / 8.0;
+      depth = clamp(depth, 0.0, 1.0);
+      float alpha = depth * 0.08;
+      gl_FragColor = vec4(0.05, 0.1, 0.2, alpha);
+    }
+  `
+});
+scene.add(new THREE.Mesh(atmosGeo, atmosMat));
 
 // ================================================================
 // BACKGROUND
@@ -937,6 +1100,12 @@ function animate(now) {
 
   // Water waves
   waterMat.uniforms.uTime.value = time;
+
+  // Sand caustics
+  sandMat.uniforms.uTime.value = time;
+
+  // God rays
+  for (const grMat of godRays) grMat.uniforms.uTime.value = time;
 
   // Background color shift
   bgMat.uniforms.uTime.value = time;
