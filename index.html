@@ -779,24 +779,44 @@ scene.add(bgSphere);
 const BOWL_INNER = BOWL_RADIUS - 0.6; // swim boundary
 const fishList = [];
 
-// --- Fish body geometry builder ---
+// --- Fish body geometry builder (high detail) ---
 function buildFishBody(key, size) {
-  const SEGS = 12, RING = 8;
-  const len = size * 2.5;
-  const hs = key === 'medium' ? 1.4 : 1.0; // angelfish are taller
+  const SEGS = 16, RING = 10;
+  const len = size * 2.6;
+  const hs = key === 'medium' ? 1.5 : key === 'large' ? 1.1 : 1.0;
   const pos = [], idx = [];
 
   for (let s = 0; s <= SEGS; s++) {
     const t = s / SEGS; // 0=tail, 1=head
-    const z = (0.5 - t) * len; // tail at +z, head at -z (faces -z for lookAt)
-    let base = Math.sin(t * Math.PI);
-    if (t < 0.12) base *= t / 0.12;
-    const rScale = key === 'small' ? 0.35 : key === 'medium' ? 0.28 : 0.42;
-    const r = base * rScale * size;
+    const z = (0.5 - t) * len;
+
+    // Species-specific body profile
+    let r;
+    if (key === 'small') {
+      // Tetra: sleek torpedo
+      r = Math.sin(t * Math.PI) * 0.33;
+      if (t < 0.1) r *= t / 0.1;
+      if (t > 0.85) r *= (1 - t) / 0.15;
+    } else if (key === 'medium') {
+      // Angelfish: diamond shaped, wider in middle
+      r = Math.sin(t * Math.PI) * 0.26;
+      if (t < 0.08) r *= t / 0.08;
+      // Narrower at front
+      if (t > 0.7) r *= Math.pow((1 - t) / 0.3, 0.7);
+    } else {
+      // Betta: robust body, wider head area
+      const peak = 0.55; // peak width behind center
+      if (t < peak) r = Math.sin((t / peak) * Math.PI * 0.5) * 0.44;
+      else r = Math.cos(((t - peak) / (1 - peak)) * Math.PI * 0.5) * 0.44;
+      if (t < 0.08) r *= t / 0.08;
+    }
+    r *= size;
 
     for (let j = 0; j <= RING; j++) {
       const a = (j / RING) * Math.PI * 2;
-      pos.push(Math.cos(a) * r, Math.sin(a) * r * hs, z);
+      // Flatten belly slightly
+      const yScale = Math.sin(a) > 0 ? hs : hs * 0.85;
+      pos.push(Math.cos(a) * r, Math.sin(a) * r * yScale, z);
     }
   }
 
@@ -835,11 +855,76 @@ class Fish {
     this.fadeIn = 1.0;
     this.swimPhase = rng() * Math.PI * 2;
     this.opacity = 0;
+    this.growthScale = 0.4; // start as baby, grow to 1.0
+    this.bankAngle = 0; // body roll when turning
+    this.prevVelX = 0; // for turn detection
 
     const color = species.colors[Math.floor(rng() * species.colors.length)];
-    this.mat = new THREE.MeshStandardMaterial({
-      color, roughness: 0.3, metalness: 0.15, side: THREE.DoubleSide,
-      transparent: true, opacity: 0
+    const baseColor = new THREE.Color(color);
+    // Iridescent fish shader
+    this.mat = new THREE.ShaderMaterial({
+      side: THREE.DoubleSide, transparent: true,
+      uniforms: {
+        uColor: { value: baseColor },
+        uOpacity: { value: 0 },
+        uTime: { value: 0 },
+        uIridescence: { value: speciesKey === 'small' ? 0.4 : speciesKey === 'large' ? 0.6 : 0.3 }
+      },
+      vertexShader: `
+        varying vec3 vNormal;
+        varying vec3 vViewDir;
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          vNormal = normalize(mat3(modelMatrix) * normal);
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vViewDir = normalize(cameraPosition - wp.xyz);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        uniform float uTime;
+        uniform float uIridescence;
+        varying vec3 vNormal;
+        varying vec3 vViewDir;
+        varying vec2 vUv;
+        void main() {
+          vec3 n = gl_FrontFacing ? vNormal : -vNormal;
+          float NdotV = max(dot(n, vViewDir), 0.0);
+
+          // Base diffuse
+          vec3 lightDir = normalize(vec3(3.0, 10.0, 5.0));
+          float diff = max(dot(n, lightDir), 0.0) * 0.6 + 0.4;
+
+          // Iridescence: hue shift based on view angle
+          float iridAngle = pow(1.0 - NdotV, 2.0);
+          vec3 iridColor = vec3(
+            0.5 + 0.5 * sin(iridAngle * 6.28 + 0.0),
+            0.5 + 0.5 * sin(iridAngle * 6.28 + 2.09),
+            0.5 + 0.5 * sin(iridAngle * 6.28 + 4.18)
+          );
+
+          vec3 color = uColor * diff;
+          color = mix(color, iridColor * diff, uIridescence * iridAngle);
+
+          // Specular
+          vec3 h = normalize(lightDir + vViewDir);
+          float spec = pow(max(dot(n, h), 0.0), 32.0) * 0.4;
+          color += spec * vec3(1.0, 0.95, 0.9);
+
+          // Rim light
+          float rim = pow(1.0 - NdotV, 3.0) * 0.15;
+          color += rim * vec3(0.4, 0.6, 0.9);
+
+          // Scale pattern (subtle)
+          float scales = sin(vUv.x * 40.0) * sin(vUv.y * 20.0) * 0.03;
+          color += scales;
+
+          gl_FragColor = vec4(color, uOpacity);
+        }
+      `
     });
 
     this.mesh = new THREE.Group();
@@ -931,15 +1016,20 @@ class Fish {
     if (this.fadeIn > 0) {
       this.fadeIn -= dt * 0.8;
       this.opacity = Math.max(0, 1 - this.fadeIn);
-      this.mat.opacity = this.opacity;
     } else if (this.dying) {
-      // Dying: fade out and sink
       this.opacity -= dt * 0.4;
-      this.mat.opacity = Math.max(0, this.opacity);
       this.pos.y -= dt * 0.3;
       if (this.opacity <= 0) { this.destroy(); return; }
     } else {
-      if (this.mat.opacity < 1) { this.mat.opacity = 1; this.opacity = 1; }
+      this.opacity = Math.min(1, this.opacity + dt * 2);
+    }
+    this.mat.uniforms.uOpacity.value = Math.max(0, this.opacity);
+    this.mat.uniforms.uTime.value = time;
+
+    // Growth: babies grow over time
+    if (this.growthScale < 1) {
+      this.growthScale = Math.min(1, this.growthScale + dt * 0.015);
+      this.mesh.scale.setScalar(this.growthScale);
     }
 
     // Smooth rotation toward velocity
@@ -949,6 +1039,15 @@ class Fish {
       _targetQuat.setFromRotationMatrix(_lookMat);
       this.mesh.quaternion.slerp(_targetQuat, Math.min(1, dt * 6));
     }
+
+    // Body banking on turns
+    const currentVelX = this.vel.x * Math.cos(-this.mesh.rotation.y) - this.vel.z * Math.sin(-this.mesh.rotation.y);
+    const turnRate = (currentVelX - this.prevVelX) / Math.max(dt, 0.001);
+    this.prevVelX = currentVelX;
+    const targetBank = Math.max(-0.4, Math.min(0.4, -turnRate * 0.08));
+    this.bankAngle += (targetBank - this.bankAngle) * Math.min(1, dt * 4);
+    // Apply bank as local Z rotation on body mesh
+    this.bodyMesh.rotation.z = this.bankAngle;
 
     // Body undulation (sine wave along spine, stronger at tail)
     const bd = this.body;
@@ -985,6 +1084,11 @@ class Fish {
     scene.remove(this.mesh);
     this.body.geo.dispose();
     this.mat.dispose();
+    // Dispose all child geometries
+    this.mesh.traverse(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material && child.material !== this.mat) child.material.dispose();
+    });
   }
 }
 
@@ -1227,7 +1331,7 @@ function checkEating() {
         const counts = countSpecies();
         if (counts[prey.speciesKey] > prey.species.minPop) {
           prey.dying = true;
-          prey.opacity = prey.mat.opacity;
+          prey.opacity = prey.mat.uniforms.uOpacity.value;
           // Predator grows slightly
           pred.mesh.scale.multiplyScalar(1.01);
         }
@@ -1271,7 +1375,7 @@ function updateEcosystem(dt) {
       const counts2 = countSpecies();
       if (counts2[f.speciesKey] > f.species.minPop) {
         f.dying = true;
-        f.opacity = f.mat.opacity;
+        f.opacity = f.mat.uniforms.uOpacity.value;
       }
     }
   }
