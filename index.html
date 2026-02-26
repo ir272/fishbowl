@@ -56,7 +56,12 @@ canvas{display:block}
   box-shadow:0 0 6px currentColor;
 }
 .species-name{flex:1;font-size:12px}
-.species-count{font-size:14px;font-weight:500;min-width:20px;text-align:right}
+.species-count{
+  font-size:14px;font-weight:500;min-width:20px;text-align:right;
+  transition:transform 0.3s ease, color 0.3s ease;
+}
+.species-count.pop-up{transform:scale(1.3);color:#66ff88}
+.species-count.pop-down{transform:scale(0.8);color:#ff6666}
 .hud-day{
   margin-top:10px;padding-top:8px;
   border-top:1px solid rgba(100,140,200,0.1);
@@ -1845,9 +1850,15 @@ class Fish {
       this.fadeIn -= dt * 0.8;
       this.opacity = Math.max(0, 1 - this.fadeIn);
     } else if (this.dying) {
-      this.opacity -= dt * 0.4;
-      this.pos.y -= dt * 0.3;
-      if (this.opacity <= 0) { this.destroy(); return; }
+      this.opacity -= dt * 0.3;
+      // Float upward (belly up) instead of sinking
+      this.pos.y += dt * 0.2;
+      // Slowly roll belly-up
+      this.bodyMesh.rotation.z += (Math.PI - this.bodyMesh.rotation.z) * dt * 0.5;
+      // Drift with slight wobble
+      this.pos.x += Math.sin(this.age * 2) * dt * 0.02;
+      this.vel.multiplyScalar(0.95); // slow to a stop
+      if (this.opacity <= 0 || this.pos.y > WATER_Y) { this.destroy(); return; }
     } else {
       this.opacity = Math.min(1, this.opacity + dt * 2);
     }
@@ -2677,14 +2688,27 @@ function getEcoHealth(counts) {
   return { label: 'Critical', color: 'rgba(220,80,60,0.7)' };
 }
 
+let prevCounts = { small: 0, medium: 0, large: 0 };
+
+function animateCount(el, prev, cur) {
+  if (cur !== prev) {
+    el.textContent = cur;
+    el.classList.remove('pop-up', 'pop-down');
+    void el.offsetWidth; // force reflow for re-triggering animation
+    el.classList.add(cur > prev ? 'pop-up' : 'pop-down');
+    setTimeout(() => el.classList.remove('pop-up', 'pop-down'), 400);
+  }
+}
+
 function updateHUD(dt, time) {
   hudTimer += dt;
   if (hudTimer < 0.5) return;
   hudTimer = 0;
   const c = countSpecies();
-  hudSmall.textContent = c.small;
-  hudMedium.textContent = c.medium;
-  hudLarge.textContent = c.large;
+  animateCount(hudSmall, prevCounts.small, c.small);
+  animateCount(hudMedium, prevCounts.medium, c.medium);
+  animateCount(hudLarge, prevCounts.large, c.large);
+  prevCounts = { small: c.small, medium: c.medium, large: c.large };
   hudTotal.textContent = c.small + c.medium + c.large;
   const phase = getDayPhase(time);
   hudTimeOfDay.textContent = getTimeOfDayLabel(phase);
