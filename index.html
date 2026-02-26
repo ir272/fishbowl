@@ -544,6 +544,25 @@ const sandMat = new THREE.ShaderMaterial({
 
     void main() {
       vec3 sand = texture2D(uSandTex, vUv).rgb;
+
+      // Subtle sand ripple texture (wind/current marks)
+      float ripple = sin(vWorldPos.x * 8.0 + vWorldPos.z * 3.0) * 0.015;
+      ripple += sin(vWorldPos.x * 4.0 - vWorldPos.z * 6.0) * 0.01;
+      sand += ripple;
+
+      // Small debris spots (darker patches like tiny shell fragments)
+      vec2 debrisUV = vWorldPos.xz * 5.0;
+      vec2 debrisID = floor(debrisUV);
+      float debrisRnd = fract(sin(dot(debrisID, vec2(127.1, 311.7))) * 43758.5453);
+      if (debrisRnd > 0.85) {
+        vec2 debrisCenter = vec2(fract(sin(dot(debrisID * 2.1, vec2(31.7, 127.1))) * 43758.5453),
+                                  fract(sin(dot(debrisID * 4.3, vec2(311.7, 27.1))) * 43758.5453));
+        float debrisDist = length(fract(debrisUV) - debrisCenter);
+        float debris = smoothstep(0.08, 0.0, debrisDist) * 0.06;
+        vec3 debrisColor = debrisRnd > 0.93 ? vec3(0.85, 0.82, 0.75) : vec3(0.5, 0.45, 0.4);
+        sand = mix(sand, debrisColor, debris);
+      }
+
       float caust = caustic(vWorldPos.xz * 0.6, uTime * 0.35);
       vec3 causticColor = vec3(0.35, 0.55, 0.85) * caust * 1.8;
       vec3 lightDir = normalize(vec3(3.0, 10.0, 5.0));
@@ -2083,6 +2102,17 @@ function boids(fish, allFish, dt) {
       fish.applyForce(_steer);
     }
   }
+
+  // Glass curiosity — occasionally swim toward the camera/glass edge
+  if (fish.personality.curiosity > 1.0 && Math.random() < 0.002 * fish.personality.curiosity) {
+    // Swim toward nearest glass wall (outward from center)
+    const outward = fish.pos.clone().normalize();
+    const targetDist = BOWL_INNER * 0.85;
+    const targetPos = outward.multiplyScalar(targetDist);
+    targetPos.y = fish.pos.y; // keep same height
+    _steer.subVectors(targetPos, fish.pos).normalize().multiplyScalar(sp.maxForce * 0.8);
+    fish.applyForce(_steer);
+  }
 }
 
 // Species definitions
@@ -2675,6 +2705,7 @@ function showEvent(msg) {
 // ================================================================
 
 let followedFish = null;
+let cameraTransition = 0; // 0=instant, lerps from 0 to 1 for smooth follow
 const followLabel = document.getElementById('follow-label');
 
 function trySelectFish(e) {
@@ -2696,6 +2727,7 @@ function trySelectFish(e) {
   }
   if (closest) {
     followedFish = closest;
+    cameraTransition = 0; // start smooth transition
     followLabel.textContent = 'Following ' + closest.species.name + '  (Esc to stop)';
     followLabel.style.display = 'block';
     return true;
@@ -3140,13 +3172,22 @@ function animate(now) {
   // Update camera
   let lookTarget;
   if (followedFish) {
+    // Smooth camera transition when starting to follow
+    cameraTransition = Math.min(1, cameraTransition + dt * 2.0);
+    const t = cameraTransition * cameraTransition * (3 - 2 * cameraTransition); // smoothstep
     lookTarget = followedFish.pos;
     const fCamRadius = Math.min(camRadius, 6);
-    camera.position.set(
-      followedFish.pos.x + fCamRadius * Math.sin(camPhi) * Math.sin(camTheta),
-      followedFish.pos.y + fCamRadius * Math.cos(camPhi),
-      followedFish.pos.z + fCamRadius * Math.sin(camPhi) * Math.cos(camTheta)
-    );
+    const targetX = followedFish.pos.x + fCamRadius * Math.sin(camPhi) * Math.sin(camTheta);
+    const targetY = followedFish.pos.y + fCamRadius * Math.cos(camPhi);
+    const targetZ = followedFish.pos.z + fCamRadius * Math.sin(camPhi) * Math.cos(camTheta);
+    if (t < 0.99) {
+      // Lerp from current position to target
+      camera.position.x += (targetX - camera.position.x) * t;
+      camera.position.y += (targetY - camera.position.y) * t;
+      camera.position.z += (targetZ - camera.position.z) * t;
+    } else {
+      camera.position.set(targetX, targetY, targetZ);
+    }
   } else if (underwaterMode) {
     // Dive mode: camera inside the bowl, looking outward
     const diveY = SAND_Y + 2.0 + Math.sin(time * 0.3) * 0.3; // gentle bob
