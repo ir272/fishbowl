@@ -507,6 +507,124 @@ seaweeds.push(createSeaweed(-2.2, -0.8, 1.3, 0x287a3d));
 seaweeds.push(createSeaweed(0.0, 2.3, 1.1, 0x348c48));
 seaweeds.push(createSeaweed(2.1, -1.2, 1.8, 0x2b7040));
 
+// Sea anemones (gently waving tentacles)
+function createAnemone(x, z, color, tentacles, radius) {
+  const group = new THREE.Group();
+  const baseMat = new THREE.MeshStandardMaterial({ color: 0x884466, roughness: 0.7 });
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.3, radius * 0.5, radius * 0.4, 8), baseMat);
+  base.position.y = radius * 0.2;
+  group.add(base);
+
+  const tentacleMat = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide, transparent: true,
+    uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(color) } },
+    vertexShader: `
+      uniform float uTime;
+      varying float vH;
+      attribute float aSeed;
+      void main() {
+        vH = uv.y;
+        vec3 pos = position;
+        float sway = sin(uTime * 0.7 + pos.x * 3.0 + pos.z * 2.0) * vH * vH * 0.2;
+        pos.x += sway;
+        pos.z += cos(uTime * 0.5 + pos.x * 2.0 + pos.z * 3.0) * vH * vH * 0.15;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      varying float vH;
+      void main() {
+        vec3 c = uColor * (0.6 + 0.4 * vH);
+        // Bright tips
+        c = mix(c, vec3(1.0, 0.9, 0.8), smoothstep(0.7, 1.0, vH) * 0.5);
+        gl_FragColor = vec4(c, 0.9);
+      }
+    `
+  });
+
+  const tentacleGeos = [];
+  for (let i = 0; i < tentacles; i++) {
+    const angle = (i / tentacles) * Math.PI * 2 + rng() * 0.3;
+    const r = radius * (0.4 + rng() * 0.4);
+    const h = radius * (0.6 + rng() * 0.8);
+    const geo = new THREE.PlaneGeometry(radius * 0.08, h, 1, 6);
+    const mesh = new THREE.Mesh(geo, tentacleMat);
+    mesh.position.set(Math.cos(angle) * r, radius * 0.4 + h * 0.5, Math.sin(angle) * r);
+    mesh.rotation.y = -angle;
+    mesh.rotation.z = (rng() - 0.5) * 0.3;
+    group.add(mesh);
+  }
+
+  group.position.set(x, SAND_Y + 0.05, z);
+  scene.add(group);
+  return { group, mat: tentacleMat };
+}
+
+const anemones = [];
+anemones.push(createAnemone(-1.8, -1.2, 0xff4488, 14, 0.4));
+anemones.push(createAnemone(1.0, 2.0, 0xff6633, 10, 0.3));
+anemones.push(createAnemone(0.5, -0.8, 0xcc55aa, 12, 0.35));
+
+// Decorative shells scattered on sand
+function createShell(x, z, scale) {
+  // Spiral shell using torus section
+  const group = new THREE.Group();
+  const shellMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(0.85 + rng() * 0.1, 0.75 + rng() * 0.15, 0.65 + rng() * 0.1),
+    roughness: 0.4, metalness: 0.1
+  });
+  // Shell body (half sphere)
+  const shellGeo = new THREE.SphereGeometry(scale, 8, 8, 0, Math.PI * 2, 0, Math.PI * 0.6);
+  const shell = new THREE.Mesh(shellGeo, shellMat);
+  shell.rotation.x = Math.PI;
+  group.add(shell);
+  // Opening lip
+  const lipGeo = new THREE.TorusGeometry(scale * 0.8, scale * 0.06, 6, 12, Math.PI);
+  const lip = new THREE.Mesh(lipGeo, shellMat);
+  lip.rotation.x = Math.PI * 0.5;
+  lip.position.y = -scale * 0.15;
+  group.add(lip);
+
+  group.position.set(x, SAND_Y + scale * 0.1, z);
+  group.rotation.y = rng() * Math.PI * 2;
+  group.rotation.z = (rng() - 0.5) * 0.2;
+  group.scale.setScalar(0.8 + rng() * 0.4);
+  scene.add(group);
+  return group;
+}
+
+createShell(0.8, 0.5, 0.12);
+createShell(-0.5, 1.2, 0.09);
+createShell(1.8, -1.5, 0.11);
+createShell(-1.6, 0.0, 0.08);
+
+// Small pebbles scattered on sand
+function createPebble(x, z) {
+  const size = 0.05 + rng() * 0.08;
+  const geo = new THREE.SphereGeometry(size, 5, 4);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    p.setY(i, p.getY(i) * (0.3 + rng() * 0.3));
+    p.setX(i, p.getX(i) * (0.8 + rng() * 0.4));
+  }
+  geo.computeVertexNormals();
+  const shade = 0.35 + rng() * 0.25;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    color: new THREE.Color(shade, shade * 0.95, shade * 0.85), roughness: 0.85
+  }));
+  mesh.position.set(x, SAND_Y + size * 0.2, z);
+  mesh.rotation.set(rng() * Math.PI, rng() * Math.PI, 0);
+  scene.add(mesh);
+}
+
+// Scatter 15 pebbles
+for (let i = 0; i < 15; i++) {
+  const angle = rng() * Math.PI * 2;
+  const r = 0.3 + rng() * (SAND_RADIUS - 0.5);
+  createPebble(Math.cos(angle) * r, Math.sin(angle) * r);
+}
+
 // ================================================================
 // FLOATING PARTICLES (plankton / debris)
 // ================================================================
@@ -1740,6 +1858,9 @@ function animate(now) {
 
   // Seaweed sway (shader-driven)
   seaweeds.forEach(sw => { sw.mat.uniforms.uTime.value = time; });
+
+  // Anemone tentacles
+  anemones.forEach(a => { a.mat.uniforms.uTime.value = time; });
 
   // Fish boids + update
   for (let i = 0; i < fishList.length; i++) {
