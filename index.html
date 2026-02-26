@@ -378,6 +378,210 @@ bgSphere.renderOrder = -100;
 scene.add(bgSphere);
 
 // ================================================================
+// BOIDS / FISH SYSTEM
+// ================================================================
+
+const BOWL_INNER = BOWL_RADIUS - 0.6; // swim boundary
+const fishList = [];
+
+class Fish {
+  constructor(species, pos) {
+    this.species = species;
+    this.pos = pos.clone();
+    this.vel = new THREE.Vector3(
+      (rng() - 0.5) * 2, (rng() - 0.5) * 0.5, (rng() - 0.5) * 2
+    ).normalize().multiplyScalar(species.speed * 0.5);
+    this.acc = new THREE.Vector3();
+    this.age = 0;
+    this.alive = true;
+
+    // Simple mesh placeholder (will be replaced with proper geometry in M3)
+    const geo = new THREE.SphereGeometry(species.size * 0.5, 8, 6);
+    geo.scale(1.8, 0.8, 1); // elongate for fish shape
+    this.mat = new THREE.MeshStandardMaterial({
+      color: species.colors[Math.floor(rng() * species.colors.length)],
+      roughness: 0.4, metalness: 0.1
+    });
+    this.mesh = new THREE.Mesh(geo, this.mat);
+    scene.add(this.mesh);
+  }
+
+  applyForce(f) { this.acc.add(f); }
+
+  update(dt) {
+    this.vel.add(this.acc);
+    // Clamp speed
+    const spd = this.vel.length();
+    if (spd > this.species.maxSpeed) this.vel.multiplyScalar(this.species.maxSpeed / spd);
+    if (spd < this.species.speed * 0.3) this.vel.normalize().multiplyScalar(this.species.speed * 0.3);
+
+    this.pos.addScaledVector(this.vel, dt * 60);
+    this.acc.set(0, 0, 0);
+    this.age += dt;
+
+    // Update mesh
+    this.mesh.position.copy(this.pos);
+    // Point mesh in direction of movement
+    if (spd > 0.01) {
+      const target = this.pos.clone().add(this.vel);
+      this.mesh.lookAt(target);
+    }
+  }
+
+  destroy() {
+    this.alive = false;
+    scene.remove(this.mesh);
+    if (this.mesh.geometry) this.mesh.geometry.dispose();
+    if (this.mat) this.mat.dispose();
+  }
+}
+
+// Boids rules
+const _sep = new THREE.Vector3();
+const _ali = new THREE.Vector3();
+const _coh = new THREE.Vector3();
+const _steer = new THREE.Vector3();
+const _diff = new THREE.Vector3();
+
+function boids(fish, allFish, dt) {
+  const sp = fish.species;
+  _sep.set(0, 0, 0);
+  _ali.set(0, 0, 0);
+  _coh.set(0, 0, 0);
+  let sepCount = 0, aliCount = 0, cohCount = 0;
+
+  for (let i = 0; i < allFish.length; i++) {
+    const other = allFish[i];
+    if (other === fish || !other.alive) continue;
+    _diff.subVectors(fish.pos, other.pos);
+    const dist = _diff.length();
+
+    // Separation (all species)
+    if (dist < sp.separationDist && dist > 0) {
+      _diff.normalize().divideScalar(dist);
+      _sep.add(_diff);
+      sepCount++;
+    }
+
+    // Alignment & cohesion (same species only)
+    if (other.species === sp && dist < sp.neighborDist) {
+      _ali.add(other.vel);
+      aliCount++;
+      _coh.add(other.pos);
+      cohCount++;
+    }
+  }
+
+  // Apply separation
+  if (sepCount > 0) {
+    _sep.divideScalar(sepCount).normalize().multiplyScalar(sp.maxSpeed);
+    _sep.sub(fish.vel).clampLength(0, sp.maxForce * 1.5);
+    fish.applyForce(_sep);
+  }
+
+  // Apply alignment
+  if (aliCount > 0) {
+    _ali.divideScalar(aliCount).normalize().multiplyScalar(sp.maxSpeed);
+    _ali.sub(fish.vel).clampLength(0, sp.maxForce);
+    fish.applyForce(_ali.multiplyScalar(sp.alignWeight));
+  }
+
+  // Apply cohesion
+  if (cohCount > 0) {
+    _coh.divideScalar(cohCount).sub(fish.pos);
+    _coh.normalize().multiplyScalar(sp.maxSpeed);
+    _coh.sub(fish.vel).clampLength(0, sp.maxForce);
+    fish.applyForce(_coh.multiplyScalar(sp.cohesionWeight));
+  }
+
+  // Wall avoidance — stay inside the bowl sphere
+  const distFromCenter = fish.pos.length();
+  if (distFromCenter > BOWL_INNER * 0.7) {
+    const pushStrength = Math.pow((distFromCenter - BOWL_INNER * 0.7) / (BOWL_INNER * 0.3), 2);
+    _steer.copy(fish.pos).normalize().multiplyScalar(-sp.maxForce * 3 * pushStrength);
+    fish.applyForce(_steer);
+  }
+
+  // Stay below water, above sand
+  if (fish.pos.y > WATER_Y - 0.5) {
+    fish.applyForce(new THREE.Vector3(0, -sp.maxForce * 2, 0));
+  }
+  if (fish.pos.y < SAND_Y + 0.5 + sp.size) {
+    fish.applyForce(new THREE.Vector3(0, sp.maxForce * 2, 0));
+  }
+
+  // Gentle tendency to stay in mid-water
+  const idealY = (SAND_Y + WATER_Y) * 0.5 - 0.5;
+  const yDiff = idealY - fish.pos.y;
+  fish.applyForce(new THREE.Vector3(0, yDiff * sp.maxForce * 0.1, 0));
+}
+
+// Species definitions
+const SPECIES = {
+  small: {
+    name: 'Neon Tetra',
+    size: 0.2,
+    speed: 1.2,
+    maxSpeed: 2.0,
+    maxForce: 0.06,
+    separationDist: 0.6,
+    neighborDist: 2.5,
+    alignWeight: 1.0,
+    cohesionWeight: 1.0,
+    colors: [0x00aaff, 0x0088dd, 0x44ccff, 0x2299ee],
+    predators: ['medium', 'large'],
+    prey: [],
+    schooling: true
+  },
+  medium: {
+    name: 'Angelfish',
+    size: 0.4,
+    speed: 0.8,
+    maxSpeed: 1.5,
+    maxForce: 0.04,
+    separationDist: 1.0,
+    neighborDist: 3.0,
+    alignWeight: 0.7,
+    cohesionWeight: 0.6,
+    colors: [0xffcc44, 0xffaa22, 0xeebb55, 0xffd866],
+    predators: ['large'],
+    prey: ['small'],
+    schooling: true
+  },
+  large: {
+    name: 'Betta',
+    size: 0.7,
+    speed: 0.5,
+    maxSpeed: 1.2,
+    maxForce: 0.03,
+    separationDist: 1.5,
+    neighborDist: 4.0,
+    alignWeight: 0.2,
+    cohesionWeight: 0.1,
+    colors: [0xcc22ff, 0xaa00dd, 0x8833cc, 0xbb44ee],
+    predators: [],
+    prey: ['small', 'medium'],
+    schooling: false
+  }
+};
+
+// Spawn initial fish
+function spawnFish(speciesKey, count) {
+  const sp = SPECIES[speciesKey];
+  for (let i = 0; i < count; i++) {
+    const angle = rng() * Math.PI * 2;
+    const r = 1 + rng() * 2;
+    const y = SAND_Y + 1.5 + rng() * (WATER_Y - SAND_Y - 3);
+    const pos = new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r);
+    fishList.push(new Fish(sp, pos));
+  }
+}
+
+spawnFish('small', 18);
+spawnFish('medium', 8);
+spawnFish('large', 3);
+
+// ================================================================
 // CAMERA CONTROLS
 // ================================================================
 
@@ -465,6 +669,13 @@ function animate(now) {
     sw.rotation.z = Math.sin(time * 0.5 + idx * 1.5) * 0.08;
     sw.rotation.x = Math.cos(time * 0.3 + idx * 2.0) * 0.05;
   });
+
+  // Fish boids + update
+  for (let i = 0; i < fishList.length; i++) {
+    if (!fishList[i].alive) continue;
+    boids(fishList[i], fishList, dt);
+    fishList[i].update(dt);
+  }
 
   renderer.render(scene, camera);
 }
