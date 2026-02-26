@@ -1578,14 +1578,17 @@ class Fish {
     this.rightFin.rotation.set(0.2, -0.4, 0.3);
     this.mesh.add(this.rightFin);
 
-    // Eyes
+    // Eyes (with night glow capability)
     const eyeGeo = new THREE.SphereGeometry(species.size * 0.06, 6, 6);
-    const eyeMat = new THREE.MeshStandardMaterial({ color: 0x111122, roughness: 0.1, metalness: 0.5 });
+    this.eyeMat = new THREE.MeshStandardMaterial({
+      color: 0x111122, roughness: 0.1, metalness: 0.5,
+      emissive: 0x000000, emissiveIntensity: 0
+    });
     const eyeZ = -this.body.len * 0.4;
     const eyeX = species.size * 0.14;
     const eyeY = species.size * 0.06;
-    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, eyeMat), { position: new THREE.Vector3(eyeX, eyeY, eyeZ) }));
-    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, eyeMat), { position: new THREE.Vector3(-eyeX, eyeY, eyeZ) }));
+    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, this.eyeMat), { position: new THREE.Vector3(eyeX, eyeY, eyeZ) }));
+    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, this.eyeMat), { position: new THREE.Vector3(-eyeX, eyeY, eyeZ) }));
 
     this.mesh.position.copy(pos);
     scene.add(this.mesh);
@@ -1969,6 +1972,7 @@ function checkEating() {
           prey.dying = true;
           prey.opacity = prey.mat.uniforms.uOpacity.value;
           pred.mesh.scale.multiplyScalar(1.01);
+          ecoStats.meals++;
           showEvent(`${pred.species.name} caught a ${prey.species.name}`);
         }
       }
@@ -2000,6 +2004,7 @@ function updateEcosystem(dt) {
         );
         const baby = new Fish(sp, key, parent.pos.clone().add(offset));
         fishList.push(baby);
+        ecoStats.births++;
         showEvent(`A baby ${sp.name} was born!`);
       }
     }
@@ -2013,6 +2018,7 @@ function updateEcosystem(dt) {
       if (counts2[f.speciesKey] > f.species.minPop) {
         f.dying = true;
         f.opacity = f.mat.uniforms.uOpacity.value;
+        ecoStats.deaths++;
         showEvent(`A ${f.species.name} passed away`);
       }
     }
@@ -2090,6 +2096,7 @@ let feedingFrenzy = 0;
 function dropFood(worldPos) {
   const count = 3 + Math.floor(Math.random() * 3);
   feedingFrenzy = 3.0; // 3 seconds of excitement
+  ecoStats.foodDropped++;
   // Splash ripple at impact point
   createSplashRipple(worldPos.x, worldPos.z);
   if (Math.random() > 0.3) createSplashRipple(worldPos.x + (Math.random() - 0.5) * 0.3, worldPos.z + (Math.random() - 0.5) * 0.3);
@@ -2320,6 +2327,9 @@ const AUTO_FEED_INTERVAL = 45; // seconds between auto-feeds
 const eventLog = document.getElementById('event-log');
 let eventCount = 0;
 
+// Ecosystem statistics
+const ecoStats = { births: 0, deaths: 0, meals: 0, foodDropped: 0 };
+
 function showEvent(msg) {
   const el = document.createElement('div');
   el.className = 'event-msg';
@@ -2376,6 +2386,7 @@ function stopFollowing() {
 
 let paused = false;
 let simSpeed = 1;
+let zenMode = false;
 const pauseOverlay = document.getElementById('pause-overlay');
 const keyboardHelp = document.getElementById('keyboard-help');
 let helpVisible = false;
@@ -2400,10 +2411,21 @@ document.addEventListener('keydown', e => {
   if (key === 'u') toggleUnderwaterMode();
   if (key === 's') takeScreenshot();
   if (key === 't') {
-    // Time-lapse toggle: 1x <-> 8x
     if (simSpeed < 5) { simSpeed = 8; showEvent('Time-lapse mode: 8x'); }
     else { simSpeed = 1; showEvent('Normal speed'); }
     updateSpeedHUD();
+  }
+  if (key === 'i') {
+    const c = countSpecies();
+    const total = c.small + c.medium + c.large;
+    showEvent(`Day ${dayCount + 1} | Pop: ${total} | Births: ${ecoStats.births} | Deaths: ${ecoStats.deaths} | Meals: ${ecoStats.meals}`);
+  }
+  if (key === 'z') {
+    zenMode = !zenMode;
+    document.getElementById('hud').style.opacity = zenMode ? '0' : '1';
+    document.getElementById('hud').style.pointerEvents = zenMode ? 'none' : 'auto';
+    fpsEl.style.display = zenMode ? 'none' : 'block';
+    if (zenMode) showEvent('Zen mode — press Z to restore HUD');
   }
 });
 
@@ -2759,7 +2781,12 @@ function animate(now) {
   // Plankton glow brighter at night (bioluminescence)
   const nightFactor = dayPhase >= 0.65 ? 1.0 : dayPhase >= 0.5 ? (dayPhase - 0.5) / 0.15 : 0;
   particles.material.opacity = 0.5 + nightFactor * 0.5;
-  particles.material.size = 0.06 + nightFactor * 0.04;
+  particles.material.size = 0.06 + nightFactor * 0.06;
+  // Color shift to blue-green at night
+  const planktonR = 0.78 - nightFactor * 0.4;
+  const planktonG = 0.86 + nightFactor * 0.1;
+  const planktonB = 1.0;
+  particles.material.color.setRGB(planktonR, planktonG, planktonB);
 
   // Bubble rise
   const bp = bubbleGeo.attributes.position;
@@ -2793,10 +2820,20 @@ function animate(now) {
   anemones.forEach(a => { a.mat.uniforms.uTime.value = time; });
 
   // Fish boids + update
+  const eyeGlowAmount = nightFactor * 0.3;
   for (let i = 0; i < fishList.length; i++) {
     if (!fishList[i].alive) continue;
     boids(fishList[i], fishList, dt);
     fishList[i].update(dt, time);
+    // Eye glow at night
+    if (fishList[i].eyeMat) {
+      fishList[i].eyeMat.emissiveIntensity = eyeGlowAmount;
+      if (eyeGlowAmount > 0) {
+        const glowColor = fishList[i].speciesKey === 'large' ? 0x6622aa :
+                          fishList[i].speciesKey === 'medium' ? 0xaa8822 : 0x2288aa;
+        fishList[i].eyeMat.emissive.setHex(glowColor);
+      }
+    }
   }
 
   // Ecosystem tick
