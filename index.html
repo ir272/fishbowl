@@ -6,11 +6,85 @@
 <title>The Impossible Fishbowl</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{overflow:hidden;background:#000}
+body{overflow:hidden;background:#000;font-family:'Helvetica Neue',Arial,sans-serif}
 canvas{display:block}
+#hud{
+  position:fixed;bottom:24px;left:24px;
+  pointer-events:none;user-select:none;z-index:10;
+}
+#hud *{pointer-events:auto}
+.hud-panel{
+  background:rgba(5,10,25,0.55);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border:1px solid rgba(100,140,200,0.15);
+  border-radius:12px;padding:14px 18px;
+  color:rgba(180,200,230,0.9);font-size:13px;
+  letter-spacing:0.3px;min-width:160px;
+}
+.hud-title{
+  font-size:10px;text-transform:uppercase;letter-spacing:1.5px;
+  color:rgba(140,170,220,0.6);margin-bottom:10px;
+}
+.species-row{
+  display:flex;align-items:center;gap:8px;
+  margin:6px 0;font-variant-numeric:tabular-nums;
+}
+.species-dot{
+  width:8px;height:8px;border-radius:50%;flex-shrink:0;
+  box-shadow:0 0 6px currentColor;
+}
+.species-name{flex:1;font-size:12px}
+.species-count{font-size:14px;font-weight:500;min-width:20px;text-align:right}
+.hud-day{
+  margin-top:10px;padding-top:8px;
+  border-top:1px solid rgba(100,140,200,0.1);
+  font-size:11px;color:rgba(140,170,220,0.5);
+}
+#feed-btn{
+  display:block;margin-top:10px;
+  background:rgba(100,140,200,0.15);border:1px solid rgba(100,140,200,0.25);
+  color:rgba(180,200,230,0.8);border-radius:8px;
+  padding:8px 16px;font-size:12px;cursor:pointer;
+  transition:all 0.2s;letter-spacing:0.5px;width:100%;
+}
+#feed-btn:hover{background:rgba(100,140,200,0.25);color:#fff}
+#feed-btn:active{transform:scale(0.97)}
+.hint{
+  position:fixed;bottom:24px;right:24px;
+  color:rgba(140,170,220,0.3);font-size:11px;
+  pointer-events:none;z-index:10;text-align:right;
+  line-height:1.6;
+}
 </style>
 </head>
 <body>
+<div id="hud">
+  <div class="hud-panel">
+    <div class="hud-title">Population</div>
+    <div class="species-row">
+      <div class="species-dot" style="color:#22aaff"></div>
+      <span class="species-name">Neon Tetra</span>
+      <span class="species-count" id="count-small">0</span>
+    </div>
+    <div class="species-row">
+      <div class="species-dot" style="color:#ffbb44"></div>
+      <span class="species-name">Angelfish</span>
+      <span class="species-count" id="count-medium">0</span>
+    </div>
+    <div class="species-row">
+      <div class="species-dot" style="color:#bb44ee"></div>
+      <span class="species-name">Betta</span>
+      <span class="species-count" id="count-large">0</span>
+    </div>
+    <div class="hud-day" id="day-counter">Day 1</div>
+    <button id="feed-btn">Drop Food</button>
+  </div>
+</div>
+<div class="hint">
+  Click to feed<br>
+  Drag to orbit<br>
+  Scroll to zoom
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 'use strict';
@@ -1201,6 +1275,55 @@ canvas.addEventListener('touchend', e => {
 });
 
 // ================================================================
+// HUD
+// ================================================================
+
+const hudSmall = document.getElementById('count-small');
+const hudMedium = document.getElementById('count-medium');
+const hudLarge = document.getElementById('count-large');
+const hudDay = document.getElementById('day-counter');
+let hudTimer = 0;
+let dayCount = 0;
+let dayAccum = 0;
+
+function updateHUD(dt) {
+  hudTimer += dt;
+  if (hudTimer < 0.5) return; // update 2x per second
+  hudTimer = 0;
+  const c = countSpecies();
+  hudSmall.textContent = c.small;
+  hudMedium.textContent = c.medium;
+  hudLarge.textContent = c.large;
+}
+
+function updateDay(dt) {
+  dayAccum += dt;
+  if (dayAccum >= 60) { // 1 minute = 1 day
+    dayAccum -= 60;
+    dayCount++;
+    hudDay.textContent = 'Day ' + (dayCount + 1);
+  }
+}
+
+// Feed button (for mobile)
+document.getElementById('feed-btn').addEventListener('click', e => {
+  e.stopPropagation();
+  // Drop food at a random position near center of bowl
+  const angle = Math.random() * Math.PI * 2;
+  const r = Math.random() * 1.5;
+  const pos = new THREE.Vector3(Math.cos(angle) * r, WATER_Y, Math.sin(angle) * r);
+  dropFood(pos);
+});
+
+// Fade out hint after 8 seconds
+const hintEl = document.querySelector('.hint');
+setTimeout(() => {
+  hintEl.style.transition = 'opacity 2s';
+  hintEl.style.opacity = '0';
+  setTimeout(() => hintEl.remove(), 2000);
+}, 8000);
+
+// ================================================================
 // RENDER LOOP
 // ================================================================
 
@@ -1271,6 +1394,10 @@ function animate(now) {
 
   // Mouse scatter update
   if (!dragging) updateMouseScatter();
+
+  // HUD
+  updateHUD(dt);
+  updateDay(dt);
 
   renderer.render(scene, camera);
 }
