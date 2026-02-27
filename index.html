@@ -1128,6 +1128,26 @@ let chestLidPivot, chestCoins = [];
   scene.add(group);
 })();
 
+// Bubble texture — hollow ring with highlight (shared by bubbles + air bubbles)
+const bCanvas = document.createElement('canvas');
+bCanvas.width = bCanvas.height = 64;
+const bCtx = bCanvas.getContext('2d');
+const bGrad = bCtx.createRadialGradient(32, 32, 18, 32, 32, 30);
+bGrad.addColorStop(0, 'rgba(180,220,255,0)');
+bGrad.addColorStop(0.6, 'rgba(180,220,255,0)');
+bGrad.addColorStop(0.82, 'rgba(200,235,255,0.5)');
+bGrad.addColorStop(0.92, 'rgba(220,240,255,0.25)');
+bGrad.addColorStop(1, 'rgba(200,230,255,0)');
+bCtx.fillStyle = bGrad;
+bCtx.fillRect(0, 0, 64, 64);
+// Highlight dot (specular)
+const hGrad = bCtx.createRadialGradient(22, 20, 0, 22, 20, 7);
+hGrad.addColorStop(0, 'rgba(255,255,255,0.9)');
+hGrad.addColorStop(1, 'rgba(255,255,255,0)');
+bCtx.fillStyle = hGrad;
+bCtx.fillRect(0, 0, 64, 64);
+const bTex = new THREE.CanvasTexture(bCanvas);
+
 // ================================================================
 // AIR STONE (bubble stream source)
 // ================================================================
@@ -1278,26 +1298,6 @@ for (let i = 0; i < BUBBLE_COUNT; i++) resetBubble(i);
 
 const bubbleGeo = new THREE.BufferGeometry();
 bubbleGeo.setAttribute('position', new THREE.BufferAttribute(bubblePositions, 3));
-
-// Bubble texture — hollow ring with highlight
-const bCanvas = document.createElement('canvas');
-bCanvas.width = bCanvas.height = 64;
-const bCtx = bCanvas.getContext('2d');
-const bGrad = bCtx.createRadialGradient(32, 32, 18, 32, 32, 30);
-bGrad.addColorStop(0, 'rgba(180,220,255,0)');
-bGrad.addColorStop(0.6, 'rgba(180,220,255,0)');
-bGrad.addColorStop(0.82, 'rgba(200,235,255,0.5)');
-bGrad.addColorStop(0.92, 'rgba(220,240,255,0.25)');
-bGrad.addColorStop(1, 'rgba(200,230,255,0)');
-bCtx.fillStyle = bGrad;
-bCtx.fillRect(0, 0, 64, 64);
-// Highlight dot (specular)
-const hGrad = bCtx.createRadialGradient(22, 20, 0, 22, 20, 7);
-hGrad.addColorStop(0, 'rgba(255,255,255,0.9)');
-hGrad.addColorStop(1, 'rgba(255,255,255,0)');
-bCtx.fillStyle = hGrad;
-bCtx.fillRect(0, 0, 64, 64);
-const bTex = new THREE.CanvasTexture(bCanvas);
 
 const bubbles = new THREE.Points(bubbleGeo, new THREE.PointsMaterial({
   map: bTex, size: 0.18, transparent: true, opacity: 0.75,
@@ -1834,8 +1834,12 @@ class Fish {
     const eyeZ = -this.body.len * 0.4;
     const eyeX = species.size * 0.14;
     const eyeY = species.size * 0.06;
-    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, this.eyeMat), { position: new THREE.Vector3(eyeX, eyeY, eyeZ) }));
-    this.mesh.add(Object.assign(new THREE.Mesh(eyeGeo, this.eyeMat), { position: new THREE.Vector3(-eyeX, eyeY, eyeZ) }));
+    const leftEye = new THREE.Mesh(eyeGeo, this.eyeMat);
+    leftEye.position.set(eyeX, eyeY, eyeZ);
+    this.mesh.add(leftEye);
+    const rightEye = new THREE.Mesh(eyeGeo, this.eyeMat);
+    rightEye.position.set(-eyeX, eyeY, eyeZ);
+    this.mesh.add(rightEye);
 
     // Mouth — opens when near food
     const mouthSize = species.size * 0.06;
@@ -3256,7 +3260,21 @@ document.addEventListener('keydown', tryStartAudio);
 
 let lastTime = 0;
 
+let animRunning = false;
+function startAnimLoop() {
+  if (!animRunning) {
+    animRunning = true;
+    requestAnimationFrame(animate);
+    // Fallback: if rAF doesn't fire (background tab), use setTimeout
+    setTimeout(() => { if (lastTime === 0) animate(performance.now()); }, 500);
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { animRunning = false; lastTime = 0; startAnimLoop(); }
+});
+
 function animate(now) {
+  animRunning = true;
   requestAnimationFrame(animate);
   const time = now * 0.001;
   let dt = Math.min(time - lastTime, 0.05);
@@ -3623,7 +3641,7 @@ function animate(now) {
 
   renderer.render(scene, camera);
 }
-requestAnimationFrame(animate);
+startAnimLoop();
 
 // Fade out loading screen + welcome
 const loadingEl = document.getElementById('loading');
